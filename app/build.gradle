@@ -1,0 +1,193 @@
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.parcelize)
+    alias(libs.plugins.kotlin.compose)
+}
+
+android {
+    namespace = 'com.eddyizm.tempus'
+    //noinspection GradleDependency
+    compileSdk = 37
+    buildToolsVersion = '36.1.0'
+
+    defaultConfig {
+        minSdkVersion 24
+        //noinspection OldTargetApi
+        targetSdk = 37
+
+        versionCode 10005
+        versionName '1.0.0-preview.5'
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+
+        javaCompileOptions {
+            annotationProcessorOptions {
+                arguments += [
+                        "room.schemaLocation": "$projectDir/schemas".toString(),
+                        "room.incremental"   : "true"
+                ]
+            }
+        }
+    }
+
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
+
+    splits {
+        abi {
+            enable = true
+            reset()
+            //noinspection ChromeOsAbiSupport
+            universalApk = true
+        }
+    }
+
+    dependenciesInfo {
+        // Disables dependency metadata when building APKs (for IzzyOnDroid/F-Droid)
+        includeInApk = false
+        // Disables dependency metadata when building Android App Bundles (for Google Play)
+        includeInBundle = false
+    }
+
+    flavorDimensions += "default"
+
+    productFlavors {
+        tempus {
+            dimension = "default"
+            applicationId = 'org.homemusic.player.cast'
+        }
+
+        degoogled {
+            dimension = "default"
+            applicationId = "org.homemusic.player"
+        }
+    }
+
+    signingConfigs {
+        jiayin {
+            if (System.getenv('JIAYIN_KEYSTORE_PATH')) {
+                storeFile = file(System.getenv('JIAYIN_KEYSTORE_PATH'))
+                storePassword = System.getenv('JIAYIN_STORE_PASSWORD')
+                keyAlias = System.getenv('JIAYIN_KEY_ALIAS') ?: 'jiayin'
+                keyPassword = System.getenv('JIAYIN_KEY_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            if (System.getenv('JIAYIN_KEYSTORE_PATH')) signingConfig = signingConfigs.jiayin
+            shrinkResources = true
+            minifyEnabled = true
+            debuggable = false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+
+        debug {
+            applicationIdSuffix = ".debug"
+            debuggable = true
+        }
+    }
+
+    buildFeatures {
+        viewBinding = true
+        buildConfig = true
+        compose = true
+    }
+
+    lint {
+        baseline = file("lint-baseline.xml")
+        disable += "MissingTranslation"
+    }
+}
+
+dependencies {
+    implementation files('../libs/lib-decoder-ffmpeg-release.aar')
+
+    // AndroidX
+    implementation libs.androidx.activity
+    implementation libs.androidx.activity.ktx
+    implementation 'androidx.activity:activity-compose:1.13.0'
+    implementation 'androidx.palette:palette-ktx:1.0.0'
+    implementation libs.androidx.annotation
+    implementation libs.androidx.constraintlayout
+    implementation libs.androidx.coordinatorlayout
+    implementation libs.androidx.lifecycle.livedata.ktx
+    implementation libs.androidx.lifecycle.viewmodel.ktx
+    implementation libs.androidx.preference.ktx
+    implementation libs.androidx.navigation.fragment.ktx
+    implementation libs.androidx.navigation.ui.ktx
+    implementation libs.androidx.recyclerview
+    implementation libs.androidx.room.runtime
+    implementation libs.androidx.splashscreen
+    implementation libs.androidx.appcompat
+    implementation libs.androidx.swiperefreshlayout
+
+    // Compose
+    implementation platform(libs.androidx.compose.bom)
+    implementation libs.androidx.compose.runtime
+    implementation libs.androidx.compose.ui
+    implementation libs.androidx.compose.ui.graphics
+    implementation libs.androidx.compose.ui.tooling.preview
+    implementation libs.androidx.compose.foundation
+    implementation libs.androidx.compose.material3
+    implementation libs.androidx.compose.runtime.livedata
+    implementation libs.reorderable
+    debugImplementation libs.androidx.compose.ui.tooling
+
+    // Android Material
+    implementation libs.material
+
+    // Glide
+    implementation libs.glide
+    implementation libs.glide.annotations
+    implementation libs.glide.compose
+    annotationProcessor libs.glide.compiler
+
+    // Media3
+    implementation libs.media3.session
+    implementation libs.media3.common
+    implementation libs.media3.exoplayer
+    implementation libs.media3.ui
+    implementation libs.media3.exoplayer.hls
+    implementation libs.media3.datasource.okhttp
+    tempusImplementation libs.media3.cast
+
+    // Route picker. Pulled in transitively by the Cast SDK for the tempus flavor
+    // already; declared here at the same version so the degoogled flavor has it too.
+    implementation libs.mediarouter
+
+    // Room Compiler
+    annotationProcessor libs.androidx.room.compiler
+
+    // Retrofit
+    implementation libs.retrofit
+    implementation libs.retrofit.converter.gson
+    implementation libs.okhttp.logging
+
+    // Misc
+    implementation libs.sdp.android
+    implementation libs.customactivityoncrash
+    implementation(libs.shimmer) {
+        artifact {
+            name = 'shimmer'
+            type = 'aar'
+        }
+    }
+    implementation libs.kotlin.metadata
+    implementation(libs.colorpickerview)
+
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.mockito:mockito-core:5.12.0'
+    testImplementation 'org.mockito.kotlin:mockito-kotlin:5.4.0'
+    testImplementation 'androidx.arch.core:core-testing:2.2.0'
+
+    androidTestImplementation libs.androidx.test.ext.junit
+    androidTestImplementation libs.androidx.test.runner
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}

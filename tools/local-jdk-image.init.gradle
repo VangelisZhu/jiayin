@@ -1,0 +1,10 @@
+// Optional local Windows workaround; no effect on ordinary builds.
+gradle.taskGraph.whenReady { graph ->
+    graph.allTasks.findAll { it instanceof JavaCompile }.each { task ->
+        def project = task.project
+        def image = project.providers.gradleProperty('jiayin.jdkImage.path').get()
+        task.options.compilerArgumentProviders.removeAll { it.class.name == 'com.android.build.gradle.tasks.JdkImageInput' }
+        def type = Class.forName('com.android.build.gradle.tasks.JdkImageInput', true, project.android.class.classLoader)
+        task.options.compilerArgumentProviders.add(type.constructors.first().newInstance(project.files(image)))
+    }
+}

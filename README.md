@@ -1,0 +1,53 @@
+# 家音 / Jiayin
+
+面向自建音乐库的开源 Android 播放器。基于 [Tempus v4.30.0](https://github.com/eddyizm/tempus/tree/v4.30.0)，使用 Kotlin、Jetpack Compose 与 Media3，继续遵循 [GPL-3.0](LICENSE)。
+
+**这是预览版，目前主要界面为简体中文。你需要自己的 Navidrome 或兼容 Subsonic 的音乐服务；本项目不提供音乐、公共服务器或共享账户。**
+
+## 下载与连接
+
+从 [Releases](https://github.com/VangelisZhu/jiayin/releases) 下载签名 APK。Android 7.0（API 24）及以上可安装；实际后台播放兼容性需在自己的手机验证。
+
+1. 确保手机能访问你的音乐服务。公网使用 HTTPS；局域网可使用本地 HTTP 地址。
+2. 首次打开，填写**音乐服务的基础地址、自己的用户名和密码**。不要填 NAS 系统管理页面地址，也不需要手工追加 `/rest`。
+3. 连接成功后同步曲库。家音不会内置、猜测或访问某个人的服务器。
+4. “随便听听”为整库随机；歌单可以独立随机。歌曲菜单可下载，默认仅 Wi-Fi。
+
+公网域名不能自行穿透运营商网络；远程听歌需要你已有可达的入口。应用不会建立 VPN，也不提供中转服务。
+
+## 界面
+
+以下为原生 Android 的生成示例数据截图，不是真实用户的曲库。
+
+<img src="docs/screenshots/home.png" width="240" alt="首页与悬浮播放器"/> <img src="docs/screenshots/player.png" width="240" alt="渐变唱片播放器"/> <img src="docs/screenshots/lyrics.png" width="240" alt="日语双语示例歌词"/>
+
+## 功能
+
+- 旋转黑胶、封面取色、柔和渐变、悬浮迷你播放器、锁屏与通知控制。
+- 随机/循环、队列管理、收藏与歌单；推荐只使用现有曲库与本机收听反馈。
+- NAS 原词与已有译文优先，逐行滚动、双语显示、时间校准、译文校正。
+- 可选 LRCLIB 手动匹配及乱码自动修复。首次连接时自动修复默认不勾选，可在设置调整；只替换元数据明确吻合的版本。
+- 可选 DeepL API 翻译，使用自己的密钥及额度；不配置也能正常播放与读取已有歌词。
+- 下载、播放缓存、离线浏览；音频焦点中断后保存原歌曲与位置。
+
+## 隐私与发布范围
+
+安装包不含预设服务器、个人账户、密码、真实曲库或运行日志。账户认证及密钥在设备上加密保存，下载和偏好按账户隔离。启用第三方歌词功能会向相应服务发送元数据或原词，详见 [隐私说明](PRIVACY_POLICY.md)。
+
+这个仓库从经过清理的源码快照建立，不携带此前私人定制的 Git 历史或本机配置。签名私钥不在仓库和 Release 中。报告问题前请遮挡服务器地址、账户、认证参数和个人曲库信息。
+
+## 构建与验证
+
+需要 JDK 21、Android SDK Platform 37、Build Tools 36.1.0；Gradle wrapper 固定为 9.8.0，并校验分发包 SHA-256。
+
+```sh
+./gradlew testDegoogledDebugUnitTest testTempusDebugUnitTest lintDegoogledRelease assembleDegoogledDebug
+```
+
+默认安装变体为 `degoogled`，不依赖 Google Play 服务。保留的 `tempus` 变体用于上游兼容检查，不作为当前发布下载。
+
+发布签名、Windows 构建与 CI 说明见 [开发说明](JIAYIN.md)。使用说明见 [USAGE.md](USAGE.md)，验证范围见 [TESTING.md](TESTING.md)。
+
+## 开源来源
+
+上游 Tempus 的版权、包命名空间、许可证和第三方声明继续保留，见 [NOTICE.md](NOTICE.md) 和 [原始 README](README.upstream.md)。本分支改造页面、播放控制、曲库持久化、推荐、歌词与下载交互。不是 Tempus 官方发布，也与商业音乐平台无关联。

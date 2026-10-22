@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:id="@+id/action_lan_playback" android:title="@string/lan_play_on" />
+    <item
+        android:id="@+id/action_open_equalizer"
+        android:title="@string/settings_app_equalizer" />
+
+    <item
+        android:id="@+id/action_add_to_playlist"
+        android:title="@string/player_overflow_menu_add_to_playlist" />
+</menu>

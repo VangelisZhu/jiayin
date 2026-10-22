@@ -1,0 +1,533 @@
+package com.eddyizm.tempus.ui.fragment;
+
+import android.content.ComponentName;
+import android.content.Context;
+import android.os.Bundle;
+import android.provider.MediaStore;
+import android.util.Log;
+import android.view.LayoutInflater;
+import android.view.Menu;
+import android.view.MenuInflater;
+import android.view.MenuItem;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
+import android.widget.SearchView;
+import android.widget.Toast;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.fragment.app.Fragment;
+import androidx.lifecycle.LiveData;
+import androidx.lifecycle.Observer;
+import androidx.lifecycle.ViewModelProvider;
+import androidx.media3.common.util.UnstableApi;
+import androidx.media3.session.MediaBrowser;
+import androidx.media3.session.SessionToken;
+import androidx.navigation.Navigation;
+import androidx.recyclerview.widget.LinearLayoutManager;
+
+import com.bumptech.glide.load.resource.bitmap.GranularRoundedCorners;
+import com.eddyizm.tempus.R;
+import com.eddyizm.tempus.databinding.FragmentPlaylistPageBinding;
+import com.eddyizm.tempus.glide.CustomGlideRequest;
+import com.eddyizm.tempus.interfaces.ClickCallback;
+import com.eddyizm.tempus.service.MediaManager;
+import com.eddyizm.tempus.subsonic.models.Child;
+import com.eddyizm.tempus.subsonic.models.Playlist;
+import com.eddyizm.tempus.service.MediaService;
+import com.eddyizm.tempus.ui.activity.MainActivity;
+import com.eddyizm.tempus.ui.adapter.SongHorizontalAdapter;
+import com.eddyizm.tempus.util.Constants;
+import com.eddyizm.tempus.util.DownloadUtil;
+import com.eddyizm.tempus.util.MusicUtil;
+import com.eddyizm.tempus.viewmodel.PlaybackViewModel;
+import com.eddyizm.tempus.viewmodel.PlaylistPageViewModel;
+import com.eddyizm.tempus.ui.dialog.PlaylistEditorDialog;
+import com.eddyizm.tempus.interfaces.PlaylistCallback;
+import com.google.common.util.concurrent.ListenableFuture;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Objects;
+import java.util.stream.Collectors;
+
+import kotlin.collections.ArrayDeque;
+
+@UnstableApi
+public class PlaylistPageFragment extends Fragment implements ClickCallback {
+    private FragmentPlaylistPageBinding bind;
+    private MainActivity activity;
+    private PlaylistPageViewModel playlistPageViewModel;
+    private PlaybackViewModel playbackViewModel;
+
+    private SongHorizontalAdapter songHorizontalAdapter;
+    private androidx.appcompat.app.AlertDialog playlistMissingDialog;
+
+    private ListenableFuture<MediaBrowser> mediaBrowserListenableFuture;
+
+    private boolean keptSynced;
+    private boolean keptStateKnown;
+    private List<String> lastSyncedIds;
+    private boolean downloadAllWaiting;
+
+    @Override
+    public void onCreate(@Nullable Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setHasOptionsMenu(true);
+    }
+
+    @Override
+    public void onCreateOptionsMenu(@NonNull Menu menu, @NonNull MenuInflater inflater) {
+        inflater.inflate(R.menu.playlist_page_menu, menu);
+
+        MenuItem searchItem = menu.findItem(R.id.action_search);
+
+        SearchView searchView = (SearchView) searchItem.getActionView();
+        searchView.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        searchView.setOnQueryTextListener(new SearchView.OnQueryTextListener() {
+            @Override
+            public boolean onQueryTextSubmit(String query) {
+                searchView.clearFocus();
+                return false;
+            }
+
+            @Override
+            public boolean onQueryTextChange(String newText) {
+                songHorizontalAdapter.getFilter().filter(newText);
+                return false;
+            }
+        });
+
+        searchView.setPadding(-32, 0, 0, 0);
+
+        initMenuOption(menu);
+    }
+
+    @Override
+    public View onCreateView(@NonNull LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
+        activity = (MainActivity) getActivity();
+
+        bind = FragmentPlaylistPageBinding.inflate(inflater, container, false);
+        View view = bind.getRoot();
+        playlistPageViewModel = new ViewModelProvider(requireActivity()).get(PlaylistPageViewModel.class);
+        playbackViewModel = new ViewModelProvider(requireActivity()).get(PlaybackViewModel.class);
+
+        Bundle args = getArguments();
+        Playlist playlistArg = args != null ? args.getParcelable(Constants.PLAYLIST_OBJECT) : null;
+        if (playlistArg == null) {
+            if (activity != null && activity.navController != null) activity.navController.navigateUp();
+            return view;
+        }
+
+        init(playlistArg);
+        initAppBar();
+        initMusicButton();
+        initBackCover();
+        initSongsView();
+        initKeepSynced(savedInstanceState == null);
+
+        playlistPageViewModel.getPlaylistMissingEvent().observe(getViewLifecycleOwner(), isMissing -> {
+            // One dialog at a time. The event is raised again by a fetch landing after a
+            // rotation rebuilt this view, and a second dialog's OK would navigate up twice.
+            if (isMissing && getContext() != null && (playlistMissingDialog == null || !playlistMissingDialog.isShowing())) {
+                playlistMissingDialog = new androidx.appcompat.app.AlertDialog.Builder(getContext())
+                    .setTitle(R.string.playlist_error_not_found_title)
+                    .setMessage(R.string.playlist_error_not_found_message)
+                    .setPositiveButton(android.R.string.ok, (dialog, which) -> {
+                        playlistPageViewModel.clearPlaylistMissingEvent();
+                        if (getContext() != null) {
+                            Toast.makeText(getContext(), R.string.playlist_error_not_found_toast, Toast.LENGTH_SHORT).show();
+                        }
+                        if (activity != null && activity.navController != null) activity.navController.navigateUp();
+                    })
+                    .setCancelable(false)
+                    .show();
+            }
+        });
+
+        return view;
+    }
+
+    @Override
+    public void onStart() {
+        super.onStart();
+
+        initializeMediaBrowser();
+
+        MediaManager.registerPlaybackObserver(mediaBrowserListenableFuture, playbackViewModel);
+        observePlayback();
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        if (songHorizontalAdapter != null) setMediaBrowserListenableFuture();
+    }
+
+    @Override
+    public void onStop() {
+        releaseMediaBrowser();
+        super.onStop();
+    }
+
+    @Override
+    public void onDestroyView() {
+        super.onDestroyView();
+        if (playlistMissingDialog != null && playlistMissingDialog.isShowing()) playlistMissingDialog.dismiss();
+        playlistMissingDialog = null;
+        // The instance outlives its view on the back stack, and both belong to the view.
+        downloadAllWaiting = false;
+        lastSyncedIds = null;
+        bind = null;
+    }
+
+    @Override
+    public boolean onOptionsItemSelected(@NonNull MenuItem item) {
+        if (item.getItemId() == R.id.action_download_playlist) {
+            if (downloadAllWaiting) return true;
+            downloadAllWaiting = true;
+            LiveData<List<Child>> live = playlistPageViewModel.songs();
+            live.observe(getViewLifecycleOwner(), new Observer<List<Child>>() {
+                @Override
+                public void onChanged(List<Child> songs) {
+                    if (songs == null) return;
+                    live.removeObserver(this);
+                    downloadAllWaiting = false;
+                    downloadMissing(songs);
+                }
+            });
+            return true;
+        } else if (item.getItemId() == R.id.action_keep_synced) {
+            // If the songs are still loading, the songs observer runs the download when they arrive.
+            boolean turnOn = !item.isChecked();
+            if (!playlistPageViewModel.setKeptSynced(turnOn)) return true;
+            item.setChecked(turnOn);
+            keptSynced = turnOn;
+            if (turnOn) downloadMissing(playlistPageViewModel.songs().getValue());
+            return true;
+        } else if (item.getItemId() == R.id.action_pin_playlist) {
+            playlistPageViewModel.setPinned(true);
+            return true;
+        } else if (item.getItemId() == R.id.action_unpin_playlist) {
+            playlistPageViewModel.setPinned(false);
+            return true;
+        } else if (item.getItemId() == R.id.action_add_to_queue) {
+            List<Child> songs = playlistPageViewModel.getPlaylistSongLiveList().getValue();
+            if (isVisible() && getActivity() != null && songs != null && !songs.isEmpty()) {
+                MediaManager.enqueue(mediaBrowserListenableFuture, songs, false);
+            }
+            return true;
+        } else if (item.getItemId() == R.id.action_edit_playlist) {
+            Bundle bundle = new Bundle();
+            bundle.putParcelable(Constants.PLAYLIST_OBJECT, playlistPageViewModel.getPlaylist());
+            Navigation.findNavController(requireView()).navigate(R.id.playlistEditorFragment, bundle);
+            return true;
+        } else if (item.getItemId() == R.id.action_edit_playlist_details) {
+            Bundle bundle = new Bundle();
+            bundle.putParcelable(Constants.PLAYLIST_OBJECT, playlistPageViewModel.getPlaylist());
+            PlaylistEditorDialog dialog = new PlaylistEditorDialog(new PlaylistCallback() {
+                @Override
+                public void onRenamed(String name) {
+                    playlistPageViewModel.getPlaylist().setName(name);
+
+                    if (bind != null) {
+                        bind.animToolbar.setTitle(name);
+                        bind.playlistNameLabel.setText(name);
+                    }
+                }
+            });
+            dialog.setArguments(bundle);
+            dialog.show(activity.getSupportFragmentManager(), null);
+            return true;
+        }
+
+        return false;
+    }
+
+    private void init(Playlist playlist) {
+        playlistPageViewModel.setPlaylist(playlist);
+        playlistPageViewModel.updateLastPlayed(playlist.getId());
+    }
+
+    private void initMenuOption(Menu menu) {
+        playlistPageViewModel.isPinned(getViewLifecycleOwner()).observe(getViewLifecycleOwner(), isPinned -> {
+            menu.findItem(R.id.action_unpin_playlist).setVisible(isPinned);
+            menu.findItem(R.id.action_pin_playlist).setVisible(!isPinned);
+        });
+        playlistPageViewModel.isKeptSynced().observe(getViewLifecycleOwner(), kept -> {
+            menu.findItem(R.id.action_keep_synced).setChecked(kept);
+        });
+    }
+
+    // The view model keeps the song list across reopens of the same playlist, so a kept playlist
+    // asks the server again on every fresh open, once. A rotation is not a fresh open.
+    private void initKeepSynced(boolean freshOpen) {
+        keptSynced = false;
+        keptStateKnown = false;
+        playlistPageViewModel.isKeptSynced().observe(getViewLifecycleOwner(), kept -> {
+            keptSynced = kept;
+            if (freshOpen && !keptStateKnown && kept && playlistPageViewModel.songs().getValue() != null) {
+                playlistPageViewModel.refreshSongs();
+            }
+            keptStateKnown = true;
+        });
+    }
+
+    // The list is posted more than once per open, the same tracks in the same order do not earn a second pass.
+    private void syncIfChanged(List<Child> songs) {
+        if (songs == null) return;
+        List<String> ids = songs.stream().map(Child::getId).collect(Collectors.toList());
+        if (ids.equals(lastSyncedIds)) return;
+        lastSyncedIds = ids;
+        downloadMissing(songs);
+    }
+
+    private void downloadMissing(List<Child> songs) {
+        if (songs == null || bind == null) return;
+
+        lastSyncedIds = songs.stream().map(Child::getId).collect(Collectors.toList());
+        Playlist playlist = playlistPageViewModel.getPlaylist();
+        DownloadUtil.downloadMissing(requireContext(), songs, playlist.getId(), playlist.getName(), missing -> {
+            Context context = getContext();
+            if (context == null || missing <= 0) return;
+            Toast.makeText(context, getResources().getQuantityString(R.plurals.playlist_sync_downloading, missing, missing), Toast.LENGTH_SHORT).show();
+        });
+    }
+
+    private void initAppBar() {
+        activity.setSupportActionBar(bind.animToolbar);
+
+        if (activity.getSupportActionBar() != null) {
+            activity.getSupportActionBar().setDisplayHomeAsUpEnabled(true);
+            activity.getSupportActionBar().setDisplayShowHomeEnabled(true);
+        }
+
+        bind.animToolbar.setTitle(playlistPageViewModel.getPlaylist().getName());
+
+        bind.playlistNameLabel.setText(playlistPageViewModel.getPlaylist().getName());
+        bind.playlistSongCountLabel.setText(getString(R.string.playlist_song_count, playlistPageViewModel.getPlaylist().getSongCount()));
+        bind.playlistDurationLabel.setText(getString(R.string.playlist_duration, MusicUtil.getReadableDurationString(playlistPageViewModel.getPlaylist().getDuration(), false)));
+
+        bind.animToolbar.setNavigationOnClickListener(v -> {
+            hideKeyboard(v);
+            activity.navController.navigateUp();
+        });
+
+        Objects.requireNonNull(bind.animToolbar.getOverflowIcon()).setTint(requireContext().getResources().getColor(R.color.titleTextColor, null));
+    }
+
+    private void hideKeyboard(View view) {
+        InputMethodManager imm = (InputMethodManager) requireActivity().getSystemService(Context.INPUT_METHOD_SERVICE);
+        imm.hideSoftInputFromWindow(view.getWindowToken(), 0);
+    }
+
+    private void initMusicButton() {
+
+        playlistPageViewModel.getPlaylistSongLiveList()
+                        .observe(getViewLifecycleOwner(), songs -> {
+                            if (songs != null) {
+
+                                bind.playlistPagePlayButton.setEnabled(!songs.isEmpty());
+                                bind.playlistPageShuffleButton.setEnabled(!songs.isEmpty());
+
+                                if (bind.songRecyclerViewPlaceholder != null) {
+                                    bind.songRecyclerViewPlaceholder.setVisibility(View.GONE);
+                                }
+
+                                bind.playlistPagePlayButton.setOnClickListener(v -> {
+                                    MediaManager.startQueue(mediaBrowserListenableFuture, songs, 0);
+                                    activity.setBottomSheetInPeek(true);
+                                });
+                                bind.playlistPageShuffleButton.setOnClickListener(v -> {
+                                    List<Child> shuffled = new ArrayList<>(songs);
+                                    Collections.shuffle(shuffled);
+                                    MediaManager.startQueue(mediaBrowserListenableFuture, shuffled, 0);
+                                    activity.setBottomSheetInPeek(true);
+                                });
+                            }
+                        });
+    }
+
+    private void initBackCover() {
+        // Observe with the view lifecycle, not the activity. The view model is
+        // activity-scoped, so observing its shared LiveData with requireActivity()
+        // left one observer per opened playlist registered for the whole session,
+        // each retaining this fragment's view tree (the cover ImageViews) — the
+        // heap climbed with every playlist opened until OOM. getViewLifecycleOwner()
+        // removes the observer at onDestroyView so the view tree can be collected.
+        // See issue #696.
+        Playlist playlist = playlistPageViewModel.getPlaylist();
+
+        if (playlist == null || bind == null) return;
+
+        String playlistCoverId = playlist.getCoverArtId();
+
+        if (playlistCoverId != null && !playlistCoverId.trim().isEmpty()) {
+            bind.playlistCoverImageViewSingle.setVisibility(View.VISIBLE);
+
+            CustomGlideRequest.Builder
+                    .from(requireContext(), playlistCoverId, CustomGlideRequest.ResourceType.Playlist)
+                    .build()
+                    .into(bind.playlistCoverImageViewSingle);
+
+        } else {
+            playlistPageViewModel.getPlaylistSongLiveList().observe(getViewLifecycleOwner(), songs -> {
+                if (bind != null && songs != null && !songs.isEmpty()) {
+
+                    List<Child> randomSongs = new ArrayList<>(songs);
+                    Collections.shuffle(randomSongs);
+
+                    // Load Top-Left image (round top-left corner only)
+                    CustomGlideRequest.Builder
+                            .from(requireContext(), !randomSongs.isEmpty() ? randomSongs.get(0).getCoverArtId() : null, CustomGlideRequest.ResourceType.Song)
+                            .build()
+                            .transform(new GranularRoundedCorners(CustomGlideRequest.CORNER_RADIUS, 0, 0, 0))
+                            .into(bind.playlistCoverImageViewTopLeft);
+
+                    // Load Top-Right image (round top-right corner only)
+                    CustomGlideRequest.Builder
+                            .from(requireContext(), randomSongs.size() > 1 ? randomSongs.get(1).getCoverArtId() : null, CustomGlideRequest.ResourceType.Song)
+                            .build()
+                            .transform(new GranularRoundedCorners(0, CustomGlideRequest.CORNER_RADIUS, 0, 0))
+                            .into(bind.playlistCoverImageViewTopRight);
+
+                    // Load Bottom-Left image (round bottom-left corner only)
+                    CustomGlideRequest.Builder
+                            .from(requireContext(), randomSongs.size() > 2 ? randomSongs.get(2).getCoverArtId() : null, CustomGlideRequest.ResourceType.Song)
+                            .build()
+                            .transform(new GranularRoundedCorners(0, 0, 0, CustomGlideRequest.CORNER_RADIUS))
+                            .into(bind.playlistCoverImageViewBottomLeft);
+
+                    // Load Bottom-Right image (round bottom-right corner only)
+                    CustomGlideRequest.Builder
+                            .from(requireContext(), randomSongs.size() > 3 ? randomSongs.get(3).getCoverArtId() : null, CustomGlideRequest.ResourceType.Song)
+                            .build()
+                            .transform(new GranularRoundedCorners(0, 0, CustomGlideRequest.CORNER_RADIUS, 0))
+                            .into(bind.playlistCoverImageViewBottomRight);
+                }
+            });
+        }
+    }
+
+    private void initSongsView() {
+        bind.songRecyclerView.setLayoutManager(new LinearLayoutManager(requireContext()));
+        bind.songRecyclerView.setHasFixedSize(true);
+
+        /* Edge-to-edge dynamic inset for bottom padding */
+        bind.songRecyclerView.setClipToPadding(false);
+        bind.songRecyclerView.post(() -> {
+            if (bind == null) return;
+            int peekHeight = (int) getResources().getDimension(R.dimen.bottom_sheet_behavior_peek_height);
+            WindowInsetsCompat rootInsets = ViewCompat.getRootWindowInsets(
+                    requireActivity().getWindow().getDecorView());
+            int navBottom = rootInsets == null ? 0
+                    : rootInsets.getInsets(WindowInsetsCompat.Type.systemBars()).bottom;
+            bind.songRecyclerView.setPadding(
+                    bind.songRecyclerView.getPaddingLeft(),
+                    bind.songRecyclerView.getPaddingTop(),
+                    bind.songRecyclerView.getPaddingRight(),
+                    navBottom+peekHeight);
+        });
+
+        // Synchronize scrolling between the list and the header in landscape mode
+        androidx.core.widget.NestedScrollView playlistInfoScrollView = bind.playlistInfoScrollView;
+        if (playlistInfoScrollView != null) {
+            bind.songRecyclerView.addOnScrollListener(new androidx.recyclerview.widget.RecyclerView.OnScrollListener() {
+                @Override
+                public void onScrolled(@NonNull androidx.recyclerview.widget.RecyclerView recyclerView, int dx, int dy) {
+                    super.onScrolled(recyclerView, dx, dy);
+                    playlistInfoScrollView.scrollBy(0, dy);
+                }
+            });
+        }
+
+        songHorizontalAdapter = new SongHorizontalAdapter(getViewLifecycleOwner(), this, true, false, null);
+        bind.songRecyclerView.setAdapter(songHorizontalAdapter);
+        setMediaBrowserListenableFuture();
+        reapplyPlayback();
+
+        playlistPageViewModel.getPlaylistSongLiveList().observe(getViewLifecycleOwner(), songs -> {
+            songHorizontalAdapter.setItems(songs);
+            if (songs != null) {
+                bind.emptyPlaylistLabel.setVisibility(songs.isEmpty() ? View.VISIBLE : View.GONE);
+                bind.playlistSongCountLabel.setText(getString(R.string.playlist_song_count, songs.size()));
+                long totalDuration = songs.stream().mapToLong(s -> s.getDuration() != null ? s.getDuration() : 0).sum();
+                bind.playlistDurationLabel.setText(getString(R.string.playlist_duration, MusicUtil.getReadableDurationString(totalDuration, false)));
+                if (keptSynced) syncIfChanged(songs);
+            }
+            reapplyPlayback();
+        });
+    }
+
+    private void initializeMediaBrowser() {
+        mediaBrowserListenableFuture = new MediaBrowser.Builder(requireContext(), new SessionToken(requireContext(), new ComponentName(requireContext(), MediaService.class))).buildAsync();
+    }
+
+    private void releaseMediaBrowser() {
+        MediaBrowser.releaseFuture(mediaBrowserListenableFuture);
+    }
+
+    @Override
+    public void onMediaClick(Bundle bundle) {
+        MediaManager.startQueue(mediaBrowserListenableFuture, bundle.getParcelableArrayList(Constants.TRACKS_OBJECT), bundle.getInt(Constants.ITEM_POSITION));
+        activity.setBottomSheetInPeek(true);
+    }
+
+    @Override
+    public void onMediaLongClick(Bundle bundle) {
+        // The search filter narrows the adapter, so its position is not the index the server
+        // removes by. The pressed row's own object is looked for first, because a playlist can
+        // hold a song twice and Child compares by value. No index while a remove or an undo is
+        // out, which hides the option in the sheet.
+        List<Child> songs = playlistPageViewModel.getPlaylistSongLiveList().getValue();
+        Child track = bundle.getParcelable(Constants.TRACK_OBJECT);
+        if (songs != null) {
+            int index = -1;
+            for (int i = 0; i < songs.size(); i++) {
+                if (songs.get(i) == track) {
+                    index = i;
+                    break;
+                }
+            }
+            if (index == -1) index = songs.indexOf(track);
+            bundle.putInt(Constants.ITEM_POSITION, playlistPageViewModel.isWriting() ? -1 : index);
+        } else {
+            bundle.putInt(Constants.ITEM_POSITION, -1);
+        }
+        bundle.putString(Constants.PLAYLIST_ID, playlistPageViewModel.getPlaylist().getId());
+        bundle.putString(Constants.PLAYLIST_NAME, playlistPageViewModel.getPlaylist().getName());
+        Navigation.findNavController(requireView()).navigate(R.id.songBottomSheetDialog, bundle);
+    }
+
+    private void observePlayback() {
+        playbackViewModel.getCurrentSongId().observe(getViewLifecycleOwner(), id -> {
+            if (songHorizontalAdapter != null) {
+                Boolean playing = playbackViewModel.getIsPlaying().getValue();
+                songHorizontalAdapter.setPlaybackState(id, playing != null && playing);
+            }
+        });
+        playbackViewModel.getIsPlaying().observe(getViewLifecycleOwner(), playing -> {
+            if (songHorizontalAdapter != null) {
+                String id = playbackViewModel.getCurrentSongId().getValue();
+                songHorizontalAdapter.setPlaybackState(id, playing != null && playing);
+            }
+        });
+    }
+
+    private void reapplyPlayback() {
+        if (songHorizontalAdapter != null) {
+            String id = playbackViewModel.getCurrentSongId().getValue();
+            Boolean playing = playbackViewModel.getIsPlaying().getValue();
+            songHorizontalAdapter.setPlaybackState(id, playing != null && playing);
+        }
+    }
+
+    private void setMediaBrowserListenableFuture() {
+        songHorizontalAdapter.setMediaBrowserListenableFuture(mediaBrowserListenableFuture);
+    }
+}

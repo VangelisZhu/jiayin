@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="JiayinTheme" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowBackground">#F6F5F2</item>
+    </style>
+    <style name="JiayinSplash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">#F6F5F2</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/jiayin_icon</item>
+        <item name="postSplashScreenTheme">@style/JiayinTheme</item>
+    </style>
+</resources>

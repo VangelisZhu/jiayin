@@ -1,0 +1,383 @@
+package com.eddyizm.tempus.util;
+
+import android.app.Notification;
+import android.content.Context;
+import android.os.Handler;
+import android.os.Looper;
+
+import androidx.core.app.NotificationCompat;
+import androidx.media3.common.util.UnstableApi;
+import androidx.media3.database.DatabaseProvider;
+import androidx.media3.database.StandaloneDatabaseProvider;
+import androidx.media3.datasource.DataSource;
+import androidx.media3.datasource.DataSpec;
+import androidx.media3.datasource.DefaultDataSource;
+import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.datasource.ResolvingDataSource;
+import androidx.media3.datasource.okhttp.OkHttpDataSource;
+import androidx.media3.datasource.cache.Cache;
+import androidx.media3.datasource.cache.CacheDataSource;
+import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor;
+import androidx.media3.datasource.cache.NoOpCacheEvictor;
+import androidx.media3.datasource.cache.SimpleCache;
+import androidx.media3.exoplayer.DefaultRenderersFactory;
+import androidx.media3.exoplayer.RenderersFactory;
+import androidx.media3.exoplayer.offline.DownloadManager;
+import androidx.media3.exoplayer.offline.DownloadNotificationHelper;
+import androidx.media3.exoplayer.scheduler.Requirements;
+
+import com.eddyizm.tempus.model.Download;
+import com.eddyizm.tempus.service.DownloaderManager;
+import com.eddyizm.tempus.subsonic.models.Child;
+
+import java.io.File;
+import java.net.CookieHandler;
+import java.net.CookieManager;
+import java.net.CookiePolicy;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.function.IntConsumer;
+import java.util.stream.Collectors;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+import okhttp3.OkHttpClient;
+
+@UnstableApi
+public final class DownloadUtil {
+
+    public static final String DOWNLOAD_NOTIFICATION_CHANNEL_ID = "download_channel";
+    public static final String DOWNLOAD_NOTIFICATION_SUCCESSFUL_GROUP = "com.eddyizm.tempus.SuccessfulDownload";
+    public static final String DOWNLOAD_NOTIFICATION_FAILED_GROUP = "com.eddyizm.tempus.FailedDownload";
+
+    private static final String STREAMING_CACHE_CONTENT_DIRECTORY = "streaming_cache";
+    private static final String DOWNLOAD_CONTENT_DIRECTORY = "downloads";
+
+    private static DataSource.Factory dataSourceFactory;
+    private static DataSource.Factory httpDataSourceFactory;
+    private static DatabaseProvider databaseProvider;
+    private static File streamingCacheDirectory;
+    private static File downloadDirectory;
+    private static Cache downloadCache;
+    private static SimpleCache streamingCache;
+    private static DownloadManager downloadManager;
+    private static DownloaderManager downloaderManager;
+    private static DownloadNotificationHelper downloadNotificationHelper;
+
+    public static boolean useExtensionRenderers() {
+        return true;
+    }
+
+    public static RenderersFactory buildRenderersFactory(Context context, boolean preferExtensionRenderer) {
+        @DefaultRenderersFactory.ExtensionRendererMode int extensionRendererMode =
+                useExtensionRenderers()
+                        ? (preferExtensionRenderer ? DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER : DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
+                        : DefaultRenderersFactory.EXTENSION_RENDERER_MODE_OFF;
+
+        return new DefaultRenderersFactory(context.getApplicationContext()).setExtensionRendererMode(extensionRendererMode);
+    }
+
+    public static synchronized DataSource.Factory getHttpDataSourceFactory() {
+        if (httpDataSourceFactory == null) {
+            CookieManager cookieManager = new CookieManager();
+            cookieManager.setCookiePolicy(CookiePolicy.ACCEPT_ORIGINAL_SERVER);
+            CookieHandler.setDefault(cookieManager);
+            DataSource.Factory serverHttpFactory = new DefaultHttpDataSource
+                    .Factory()
+                    .setAllowCrossProtocolRedirects(true);
+            // Requests to the signed-in server that need its custom headers go through OkHttp,
+            // which re-checks the host on every redirect; see CustomHeadersDataSource.
+            httpDataSourceFactory = new CustomHeadersDataSource.Factory(
+                    serverHttpFactory,
+                    new OkHttpDataSource.Factory(buildCustomHeadersHttpClient()),
+                    url -> !ServerHeaders.getHeadersForActiveServer(url).isEmpty());
+        }
+
+        return httpDataSourceFactory;
+    }
+
+    /**
+     * The OkHttp client behind {@link CustomHeadersDataSource}, with the same timeouts as
+     * {@link DefaultHttpDataSource} and the client certificate, if one is set up.
+     */
+    private static OkHttpClient buildCustomHeadersHttpClient() {
+        OkHttpClient.Builder builder = new OkHttpClient.Builder()
+                .connectTimeout(DefaultHttpDataSource.DEFAULT_CONNECT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+                .readTimeout(DefaultHttpDataSource.DEFAULT_READ_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+                .addNetworkInterceptor(ServerHeaders.createInterceptor());
+        if (ClientCertManager.INSTANCE.getSslSocketFactory() != null) {
+            builder.sslSocketFactory(ClientCertManager.INSTANCE.getSslSocketFactory(),
+                    ClientCertManager.INSTANCE.getTrustManager());
+        }
+        return builder.build();
+    }
+
+    public static synchronized DataSource.Factory getHttpDataSourceFactoryForRadio() {
+        CookieManager cookieManager = new CookieManager();
+        cookieManager.setCookiePolicy(CookiePolicy.ACCEPT_ORIGINAL_SERVER);
+        CookieHandler.setDefault(cookieManager);
+        
+        // Create a factory with ICY metadata support for radio streams
+        Map<String, String> defaultRequestProperties = new HashMap<>();
+        defaultRequestProperties.put("Icy-MetaData", "1");
+        defaultRequestProperties.put("User-Agent", "Tempus/1.0");
+        
+        return new DefaultHttpDataSource
+                .Factory()
+                .setAllowCrossProtocolRedirects(true)
+                .setDefaultRequestProperties(defaultRequestProperties);
+    }
+
+    public static synchronized DataSource.Factory getUpstreamDataSourceFactory(Context context) {
+        DefaultDataSource.Factory upstreamFactory = new DefaultDataSource.Factory(context, getHttpDataSourceFactory());
+        dataSourceFactory = buildReadOnlyCacheDataSource(upstreamFactory, getDownloadCache(context));
+        return dataSourceFactory;
+    }
+
+    public static synchronized DataSource.Factory getUpstreamDataSourceFactoryForRadio(Context context) {
+        DefaultDataSource.Factory upstreamFactory = new DefaultDataSource.Factory(context, getHttpDataSourceFactoryForRadio());
+        return buildReadOnlyCacheDataSource(upstreamFactory, getDownloadCache(context));
+    }
+
+    public static synchronized DataSource.Factory getCacheDataSourceFactory(Context context) {
+        CacheDataSource.Factory streamCacheFactory = new CacheDataSource.Factory()
+                .setCache(getStreamingCache(context))
+                .setCacheKeyFactory(new StreamingCacheKeyFactory())
+                .setUpstreamDataSourceFactory(getUpstreamDataSourceFactory(context));
+
+        ResolvingDataSource.Factory resolvingFactory = new ResolvingDataSource.Factory(
+                new StreamingCacheDataSource.Factory(streamCacheFactory),
+                dataSpec -> {
+                    DataSpec.Builder builder = dataSpec.buildUpon();
+                    builder.setFlags(dataSpec.flags & ~DataSpec.FLAG_DONT_CACHE_IF_LENGTH_UNKNOWN);
+                    return builder.build();
+                }
+        );
+        dataSourceFactory = buildReadOnlyCacheDataSource(resolvingFactory, getDownloadCache(context));
+        return dataSourceFactory;
+    }
+
+    /**
+     * Writes into the same streaming cache (and with the same keys) the player reads
+     * from, but bypasses the download-cache/resolving wrappers of
+     * {@link #getCacheDataSourceFactory(Context)}: CacheWriter needs a plain
+     * CacheDataSource.
+     */
+    public static synchronized CacheDataSource.Factory getStreamingCacheWriterFactory(Context context) {
+        return new CacheDataSource.Factory()
+                .setCache(getStreamingCache(context))
+                .setCacheKeyFactory(new StreamingCacheKeyFactory())
+                .setUpstreamDataSourceFactory(new DefaultDataSource.Factory(context, getHttpDataSourceFactory()));
+    }
+
+    public static synchronized Cache getStreamingCacheForPreload(Context context) {
+        return getStreamingCache(context);
+    }
+
+    public static synchronized DownloadNotificationHelper getDownloadNotificationHelper(Context context) {
+        if (downloadNotificationHelper == null) {
+            downloadNotificationHelper = new DownloadNotificationHelper(context, DOWNLOAD_NOTIFICATION_CHANNEL_ID);
+        }
+
+        return downloadNotificationHelper;
+    }
+
+    public static synchronized DownloadManager getDownloadManager(Context context) {
+        ensureDownloadManagerInitialized(context);
+        return downloadManager;
+    }
+
+    public static synchronized DownloaderManager getDownloadTracker(Context context) {
+        ensureDownloadManagerInitialized(context);
+        return downloaderManager;
+    }
+
+    private static synchronized Cache getDownloadCache(Context context) {
+        if (downloadCache == null) {
+            File downloadContentDirectory = new File(getDownloadDirectory(context), DOWNLOAD_CONTENT_DIRECTORY);
+            downloadCache = new SimpleCache(downloadContentDirectory, new NoOpCacheEvictor(), getDatabaseProvider(context));
+        }
+
+        return downloadCache;
+    }
+
+    private static synchronized SimpleCache getStreamingCache(Context context) {
+        if (streamingCache == null) {
+            File streamingCacheDirectory = new File(getStreamingCacheDirectory(context), STREAMING_CACHE_CONTENT_DIRECTORY);
+
+            streamingCache = new SimpleCache(
+                    streamingCacheDirectory,
+                    new LeastRecentlyUsedCacheEvictor(Preferences.getStreamingCacheSize() * 1024 * 1024),
+                    getDatabaseProvider(context)
+            );
+        }
+
+        return streamingCache;
+    }
+
+    private static synchronized void ensureDownloadManagerInitialized(Context context) {
+        if (downloadManager == null) {
+            downloadManager = new DownloadManager(
+                    context,
+                    getDatabaseProvider(context),
+                    getDownloadCache(context),
+                    getHttpDataSourceFactory(),
+                    Executors.newFixedThreadPool(6)
+            );
+
+            if (Preferences.isDownloadWifiOnly()) {
+                downloadManager.setRequirements(new Requirements(Requirements.NETWORK_UNMETERED));
+            }
+
+            downloaderManager = new DownloaderManager(context, getHttpDataSourceFactory(), downloadManager);
+        }
+    }
+
+    private static synchronized DatabaseProvider getDatabaseProvider(Context context) {
+        if (databaseProvider == null) {
+            databaseProvider = new StandaloneDatabaseProvider(context);
+        }
+
+        return databaseProvider;
+    }
+
+    private static synchronized File getStreamingCacheDirectory(Context context) {
+        if (streamingCacheDirectory == null) {
+            if (Preferences.getStreamingCacheStoragePreference() == 0) {
+                streamingCacheDirectory = context.getExternalFilesDirs(null)[0];
+                // workaround for crdroid degoogled android 16 sometimes unable to write to the
+                // default external files dir, fall back to internal dir if we can't write
+                if (streamingCacheDirectory == null || !streamingCacheDirectory.canWrite()) {
+                    streamingCacheDirectory = context.getFilesDir();
+                }
+            } else {
+                try {
+                    streamingCacheDirectory = context.getExternalFilesDirs(null)[1];
+                } catch (Exception exception) {
+                    streamingCacheDirectory = context.getExternalFilesDirs(null)[0];
+                    Preferences.setStreamingCacheStoragePreference(0);
+                }
+
+            }
+        }
+
+        return streamingCacheDirectory;
+    }
+
+    private static synchronized File getDownloadDirectory(Context context) {
+        if (downloadDirectory == null) {
+            int pref = Preferences.getDownloadStoragePreference();
+            if (pref == 0) {
+                downloadDirectory = context.getExternalFilesDirs(null)[0];
+                // workaround for crdroid degoogled android 16 sometimes unable to write to the
+                // default external files dir, fall back to internal dir if we can't write
+                if (downloadDirectory == null || !downloadDirectory.canWrite()) {
+                    downloadDirectory = context.getFilesDir();
+                }
+            } else if (pref == 1) {
+                try {
+                    downloadDirectory = context.getExternalFilesDirs(null)[1];
+                } catch (Exception exception) {
+                    downloadDirectory = context.getExternalFilesDirs(null)[0];
+                    Preferences.setDownloadStoragePreference(0);
+                }
+            } else {
+                downloadDirectory = context.getExternalFilesDirs(null)[0];
+            }
+        }
+
+        return downloadDirectory;
+    }
+
+    private static CacheDataSource.Factory buildReadOnlyCacheDataSource(DataSource.Factory upstreamFactory, Cache cache) {
+        return new CacheDataSource.Factory()
+                .setCache(cache)
+                .setUpstreamDataSourceFactory(upstreamFactory)
+                .setCacheWriteDataSinkFactory(null)
+                .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR);
+    }
+
+    public static synchronized void eraseDownloadFolder(Context context) {
+        File directory = getDownloadDirectory(context);
+
+        ArrayList<File> files = listFiles(directory, new ArrayList<>());
+
+        for (File file : files) {
+            file.delete();
+        }
+    }
+
+    private static synchronized ArrayList<File> listFiles(File directory, ArrayList<File> files) {
+        if (directory.isDirectory()) {
+            File[] list = directory.listFiles();
+
+            if (list != null) {
+                for (File file : list) {
+                    if (file.isFile() && file.getName().toLowerCase().endsWith(".exo")) {
+                        files.add(file);
+                    } else if (file.isDirectory()) {
+                        listFiles(file, files);
+                    }
+                }
+            }
+        }
+
+        return files;
+    }
+
+    public static synchronized long getStreamingCacheSize(Context context) {
+        return getStreamingCache(context).getCacheSpace();
+    }
+
+    /**
+     * Queues the tracks neither on the device nor already asked for. Reports on the main thread how
+     * many reached the download service, or a negative number when every start was refused. Call on the main thread.
+     */
+    public static void downloadMissing(Context context, List<Child> songs, String playlistId, String playlistName, IntConsumer onQueued) {
+        // A playlist can list the same track twice.
+        Map<String, Child> byId = new LinkedHashMap<>();
+        for (Child song : songs) byId.putIfAbsent(song.getId(), song);
+        Context appContext = context.getApplicationContext();
+        Handler main = new Handler(Looper.getMainLooper());
+
+        if (Preferences.getDownloadDirectoryUri() == null) {
+            DownloaderManager manager = getDownloadTracker(context);
+            List<Child> missing = byId.values().stream()
+                    .filter(song -> !manager.isDownloaded(song.getId()) && !manager.isRequested(song.getId()))
+                    .collect(Collectors.toList());
+            int sent = manager.download(
+                    MappingUtil.mapDownloads(missing),
+                    missing.stream().map(child -> {
+                        Download toDownload = new Download(child);
+                        toDownload.setPlaylistId(playlistId);
+                        toDownload.setPlaylistName(playlistName);
+                        return toDownload;
+                    }).collect(Collectors.toList())
+            );
+            onQueued.accept(sent == 0 && !missing.isEmpty() ? -1 : sent);
+        } else {
+            // The folder index only builds off main. While a rebuild runs it is empty and every track reads as
+            // missing, and the writer's own size check is what keeps a file already there from being written again.
+            new Thread(() -> {
+                ExternalAudioReader.ensureCache();
+                List<Child> missing = byId.values().stream()
+                        .filter(song -> ExternalAudioReader.getUri(song) == null && !ExternalAudioWriter.isPending(song.getId()))
+                        .collect(Collectors.toList());
+                missing.forEach(child -> ExternalAudioWriter.downloadToUserDirectory(appContext, child, playlistId, playlistName));
+                main.post(() -> onQueued.accept(missing.size()));
+            }).start();
+        }
+    }
+
+    public static Notification buildGroupSummaryNotification(Context context, String channelId, String groupId, int icon, String title) {
+        return new NotificationCompat.Builder(context, channelId)
+                .setContentTitle(title)
+                .setSmallIcon(icon)
+                .setGroup(groupId)
+                .setGroupSummary(true)
+                .build();
+    }
+}
