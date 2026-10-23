@@ -116,7 +116,7 @@ class JiayinRepository(val context: Context) {
                 val id = a.str("id"); if (id.isNotBlank()) {
                     val previous = get("artist", id, ArtistProfile::class.java)
                     val optimistic = pending.lastOrNull { it.params["artistId"]?.firstOrNull() == id }
-                    put("artist", id, ArtistProfile(id, a.str("name"), optimistic?.let { it.method == "star" } ?: (isStarred(a)), previous?.region ?: "未分类", previous?.type ?: "未分类"))
+                    put("artist", id, ArtistProfile(id, a.str("name"), optimistic?.let { it.method == "star" } ?: (isStarred(a)), previous?.region ?: "未分类", previous?.type ?: "未分类", previous?.sortName))
                 }
             }
         }

@@ -10,7 +10,7 @@ import java.security.MessageDigest
     val created: Long = 0, val starred: Boolean = false, val path: String = "",
     val number: Int = 0, val disc: Int = 0, val releaseDate: Long = 0,
 )
-@Keep data class ArtistProfile(val id: String, val name: String, val starred: Boolean = false, val region: String = "未分类", val type: String = "未分类")
+@Keep data class ArtistProfile(val id: String, val name: String, val starred: Boolean = false, val region: String = "未分类", val type: String = "未分类", val sortName: String? = null)
 fun artistKey(t: Track) = t.artistId.ifBlank { "name:${t.artist.trim().lowercase(java.util.Locale.ROOT)}" }
 fun artistCollection(t: Track, tracks: List<Track>) = MusicList("artist:${artistKey(t)}", t.artist, tracks.filter { artistKey(it) == artistKey(t) }.map { it.id }, t.cover)
 @Keep data class MusicList(val id: String, val name: String, val tracks: List<String> = emptyList(), val cover: String = "", val pending: Boolean = false)

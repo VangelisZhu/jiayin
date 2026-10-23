@@ -145,13 +145,13 @@ class MediaPipelineTest {
         }
     }
 
-    internal class MediaServer(count: Int = 2, catalog: Boolean = false) : AutoCloseable {
+    internal class MediaServer(count: Int = 2, catalog: Boolean = false, supplied: List<Track>? = null) : AutoCloseable {
         private val socket = ServerSocket(0)
         val port get() = socket.localPort
         var online = true
         val streams = AtomicInteger(); val images = AtomicInteger(); val downloads = AtomicInteger()
         private val scope = UUID.randomUUID().toString()
-        val tracks = (1..count).map { Track("pipeline-$scope-$it", "播放测试 $it", if (catalog) "示例歌手 ${it % 3}" else "家音测试", album = if (catalog) "专辑 ${it % 2}" else "", albumId = if (catalog) "album-${it % 2}" else "", artistId = if (catalog) "artist-${it % 3}" else "", duration = 30, genre = if (catalog) "风格 ${it % 2}" else "", releaseDate = if (catalog) 20200101L + it * 10000 else 0) }
+        val tracks = supplied ?: (1..count).map { Track("pipeline-$scope-$it", "播放测试 $it", if (catalog) "示例歌手 ${it % 3}" else "家音测试", album = if (catalog) "专辑 ${it % 2}" else "", albumId = if (catalog) "album-${it % 2}" else "", artistId = if (catalog) "artist-${it % 3}" else "", duration = 30, genre = if (catalog) "风格 ${it % 2}" else "", releaseDate = if (catalog) 20200101L + it * 10000 else 0) }
         var rejectMetadata = false
         val starCalls = AtomicInteger()
         private val audio: ByteArray = ByteBuffer.allocate(44 + 16000 * 2 * 30).order(ByteOrder.LITTLE_ENDIAN).apply {
@@ -183,7 +183,7 @@ class MediaPipelineTest {
                         else -> Gson().toJson(mapOf("subsonic-response" to when {
                             request.contains("/search3") -> {
                                 val offset = Regex("songOffset=(\\d+)").find(String(body))?.groupValues?.get(1)?.toInt() ?: 0
-                                mapOf("status" to "ok", "searchResult3" to mapOf("song" to tracks.drop(offset).take(500)))
+                                mapOf("status" to "ok", "searchResult3" to mapOf("song" to tracks.drop(offset).take(500).map { t -> Gson().toJsonTree(t).asJsonObject.apply { addProperty("coverArt", t.cover); if (t.releaseDate > 0) addProperty("year", t.releaseDate / 10000) } }))
                             }
                             request.contains("/getArtists") && !rejectMetadata -> mapOf("status" to "ok", "artists" to mapOf("index" to listOf(mapOf("artist" to tracks.distinctBy { it.artistId }.filter { it.artistId.isNotBlank() }.map { mapOf("id" to it.artistId, "name" to it.artist) }))))
                             request.contains("/getTopSongs") && !rejectMetadata -> mapOf("status" to "ok", "topSongs" to mapOf("song" to tracks.reversed()))

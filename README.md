@@ -11,7 +11,7 @@
 1. 确保手机能访问你的音乐服务。公网使用 HTTPS；局域网可使用本地 HTTP 地址。
 2. 首次打开，填写**音乐服务的基础地址、自己的用户名和密码**。不要填 NAS 系统管理页面地址，也不需要手工追加 `/rest`。
 3. 连接成功后同步曲库。家音不会内置、猜测或访问某个人的服务器。
-4. “随便听听”为整库随机；歌单可以独立随机。歌曲菜单可下载，默认仅 Wi-Fi。
+4. “随便听听”按偏好探索未收藏、未加入歌单的曲目，并减少歌手重复；歌单可以独立随机。歌曲菜单可下载，默认仅 Wi-Fi。
 
 公网域名不能自行穿透运营商网络；远程听歌需要你已有可达的入口。应用不会建立 VPN，也不提供中转服务。
 
@@ -21,6 +21,8 @@
 
 <img src="docs/screenshots/home.png" width="240" alt="首页与悬浮播放器"/> <img src="docs/screenshots/player.png" width="240" alt="渐变唱片播放器"/> <img src="docs/screenshots/lyrics.png" width="240" alt="日语双语示例歌词"/>
 
+<img src="docs/screenshots/search-browser.png" width="240" alt="搜索浏览与放大镜"/> <img src="docs/screenshots/artist-index.png" width="240" alt="歌手字母索引"/> <img src="docs/screenshots/folder-hierarchy.png" width="240" alt="文件夹层级浏览"/>
+
 ## 功能
 
 - 旋转黑胶、封面取色、柔和渐变、悬浮迷你播放器、锁屏与通知控制。
@@ -29,6 +31,7 @@
 - 可选 LRCLIB 手动匹配及乱码自动修复。首次连接时自动修复默认不勾选，可在设置调整；只替换元数据明确吻合的版本。
 - 可选 DeepL API 翻译，使用自己的密钥及额度；不配置也能正常播放与读取已有歌词。
 - 下载、播放缓存、离线浏览；音频焦点中断后保存原歌曲与位置。
+- 独立本地搜索、歌手拼音／字母快速定位、层级／平铺文件夹、目录地区整理和浏览位置记忆。
 
 ## 隐私与发布范围
 

@@ -25,10 +25,12 @@ import kotlinx.coroutines.flow.*
 import java.util.UUID
 
 data class DownloadInfo(val id: String, val progress: Float, val state: Int, val bytes: Long)
+data class SearchUiState(val active: Boolean = false, val focusKeyboard: Boolean = true, val query: String = "", val scope: SearchScope = SearchScope(), val category: SearchKind = SearchKind.ALL, val hits: List<SearchDocument> = emptyList(), val history: List<SearchHistory> = emptyList(), val busy: Boolean = false)
 data class HomeState(
     val configured: Boolean = false, val loading: Boolean = true, val status: String = "正在读取曲库",
     val library: Library = Library(), val records: Map<String, Listening> = emptyMap(),
     val artists: Map<String, ArtistProfile> = emptyMap(), val topSongs: Map<String, List<String>> = emptyMap(),
+    val index: LibraryIndex = LibraryIndex.EMPTY, val regionRules: List<PathRegionRule> = emptyList(),
     val recommendations: List<Recommendation> = emptyList(), val downloads: List<DownloadInfo> = emptyList(),
     val pending: Int = 0, val connection: String = "尚未测试连接", val message: String? = null, val lyrics: Lyrics? = null,
     val lyricsBusy: Boolean = false, val lyricMatches: List<LyricMatch> = emptyList(),
@@ -39,6 +41,13 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
     private val lyricsRepo = LyricsRepository(repo)
     private val mutable = MutableStateFlow(HomeState(configured = repo.configured))
     val state = mutable.asStateFlow()
+    private val searchMutable = MutableStateFlow(SearchUiState())
+    val search = searchMutable.asStateFlow()
+    private var searchJob: Job? = null
+    private var refreshNumber = 0L
+    val folderRequest = MutableStateFlow(BrowseLocation())
+    fun requestFolder(path: String) = restoreBrowser("文件夹", path)
+    fun restoreBrowser(category: String, path: String) { folderRequest.value = BrowseLocation(category, path, folderRequest.value.request + 1) }
     val playerRequests = MutableStateFlow(0L)
     fun requestPlayer() { playerRequests.value++ }
     private var controller: MediaController? = null
@@ -51,6 +60,7 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
     private val artistRequests = mutableSetOf<String>()
     private var discoveryJob: Job? = null
     var selectedCollection: MusicList? = null
+    var searchOrigin: SearchReturnLocation? = null
     init {
         viewModelScope.launch {
             withContext(Dispatchers.IO) { repo.bindUpstream() }
@@ -76,10 +86,56 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
         }.onFailure { message("播放服务连接失败：${it.cause?.message ?: it.message}"); controllerFuture = null } }, ContextCompat.getMainExecutor(getApplication()))
     }
     suspend fun refreshLocal() {
+        val expected = ++refreshNumber
         val local = withContext(Dispatchers.IO) { Triple(repo.library(), repo.listening(), repo.dao.list(repo.account, "outbox").size) }
         val artists = withContext(Dispatchers.IO) { repo.list("artist", ArtistProfile::class.java).associateBy { it.id } }
+        val rules = withContext(Dispatchers.IO) { repo.list("folder-region", PathRegionRule::class.java) }
+        val index = withContext(Dispatchers.Default) { LibraryIndex.build(local.first, artists, rules, AndroidNameOrdering()) }
         val recommendations = withContext(Dispatchers.Default) { RecommendationEngine.recommend(local.first.tracks, local.second, System.currentTimeMillis() / 86_400_000 + batch) }
-        mutable.update { it.copy(configured = repo.configured, loading = false, library = local.first, records = local.second, artists = artists, recommendations = recommendations, pending = local.third) }
+        if (expected != refreshNumber) return
+        mutable.update { it.copy(configured = repo.configured, loading = false, library = local.first, records = local.second, artists = artists, recommendations = recommendations, pending = local.third, index = index, regionRules = rules) }
+        if (search.value.active) updateSearch(search.value.query)
+    }
+    fun openSearch(scope: SearchScope = SearchScope()) {
+        searchJob?.cancel()
+        searchMutable.value = SearchUiState(active = true, scope = scope)
+        task { val history = withContext(Dispatchers.IO) { repo.list("search-history", SearchHistory::class.java).sortedByDescending { it.time }.take(20) }; searchMutable.update { it.copy(history = history) } }
+    }
+    fun hideSearch() { searchJob?.cancel(); searchMutable.update { it.copy(active = false, busy = false) } }
+    fun resumeSearch() { searchMutable.update { it.copy(active = true, focusKeyboard = false) }; updateSearch(search.value.query) }
+    fun updateSearch(query: String, scope: SearchScope = search.value.scope, category: SearchKind = search.value.category) {
+        searchJob?.cancel()
+        searchMutable.update { it.copy(query = query, scope = scope, category = category, hits = emptyList(), busy = query.isNotBlank()) }
+        searchJob = task {
+            delay(180)
+            val index = state.value.index
+            val hits = withContext(Dispatchers.Default) { index.search(query, scope, category) { ensureActive() } }
+            ensureActive()
+            searchMutable.update { it.copy(hits = hits, busy = false) }
+        }
+    }
+    fun rememberSearch(query: String = search.value.query) = task {
+        val value = query.trim(); if (value.isBlank()) return@task
+        val history = withContext(Dispatchers.IO) {
+            repo.put("search-history", digest(normalizeSearch(value)), SearchHistory(value, System.currentTimeMillis()))
+            val all = repo.list("search-history", SearchHistory::class.java).sortedByDescending { it.time }
+            all.drop(20).forEach { repo.dao.delete(repo.account, "search-history", digest(normalizeSearch(it.query))) }; all.take(20)
+        }
+        searchMutable.update { it.copy(history = history) }
+    }
+    fun deleteSearchHistory(query: String? = null) = task {
+        withContext(Dispatchers.IO) { if (query == null) repo.dao.clear(repo.account, "search-history") else repo.dao.delete(repo.account, "search-history", digest(normalizeSearch(query))) }
+        searchMutable.update { it.copy(history = if (query == null) emptyList() else it.history.filterNot { h -> h.query == query }) }
+    }
+    fun setFolderRegion(path: String, region: String?) = task {
+        withContext(Dispatchers.IO) { if (region == null) repo.dao.delete(repo.account, "folder-region", digest(path)) else repo.put("folder-region", digest(path), PathRegionRule(path, region)) }
+        refreshLocal(); message(if (region == null) "已清除目录地区设置" else "目录地区已保存在本机，子目录继承")
+    }
+    fun updateArtistPreferences(profile: ArtistProfile, region: String, type: String, name: String) = task {
+        withContext(Dispatchers.IO) { val latest = repo.get("artist", profile.id, ArtistProfile::class.java) ?: profile; repo.put("artist", profile.id, latest.copy(region = region, type = type, sortName = name.trim().takeIf { it.isNotEmpty() })) }; refreshLocal()
+    }
+    fun setArtistSortName(profile: ArtistProfile, name: String) = task {
+        withContext(Dispatchers.IO) { val latest = repo.get("artist", profile.id, ArtistProfile::class.java) ?: profile; repo.put("artist", profile.id, latest.copy(sortName = name.trim().takeIf { it.isNotEmpty() })) }; refreshLocal()
     }
     fun login(address: String, user: String, password: String) = task {
         mutable.update { it.copy(loading = true, status = "正在连接 NAS") }

@@ -51,15 +51,15 @@ class BrowseManagementTest {
                 node("热门歌曲"); shot("10-artist-songs")
                 click("收藏歌手")
                 await("artist favorite synchronized") { server.starCalls.get() > 0 && vm.state.value.artists[artistKey(song)]?.starred == true }
-                click("搜索歌手作品"); node("搜索这位歌手的歌曲或专辑")
+                click("搜索歌手作品"); node("搜索关键词"); click("取消")
                 click("专辑"); shot("11-artist-albums")
                 click("设置歌手分类"); click("日本"); click("乐队/组合"); click("保存")
                 await("classification") { vm.state.value.artists[artistKey(song)]?.region == "日本" }
                 repo.synchronize(); vm.refreshLocal()
                 assertEquals("日本", vm.state.value.artists[artistKey(song)]?.region)
                 instrumentation.uiAutomation.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK)
-                click("日本"); click("乐队/组合"); node(song.artist); shot("12-artist-categories")
-                click("曲风"); node("曲库中的曲风"); click("风格 1"); node("随机播放 · 6 首"); shot("13-genres")
+                click("全部地区 ▾"); click("日本"); click("全部类型 ▾"); click("乐队/组合"); node(song.artist); shot("12-artist-categories")
+                click("曲风"); node("来自你的曲库"); click("风格 1"); node("随机播放"); shot("13-genres")
                 click("我的"); click("下载与离线")
                 // Seed genuine paused Media3 requests. No reflective UI-state injection.
                 instrumentation.runOnMainSync {
@@ -84,7 +84,7 @@ class BrowseManagementTest {
         } } finally { context.packageManager.setComponentEnabledSetting(component, PackageManager.COMPONENT_ENABLED_STATE_DEFAULT, PackageManager.DONT_KILL_APP) }
     }
     private suspend fun await(label: String, check: () -> Boolean) { val end = SystemClock.elapsedRealtime()+12000; while (!check()) { check(SystemClock.elapsedRealtime()<end) { "$label timed out" }; delay(100) } }
-    private fun nodes(): List<AccessibilityNodeInfo> { val root = instrumentation.uiAutomation.rootInActiveWindow ?: return emptyList(); val all = mutableListOf<AccessibilityNodeInfo>(); val q = ArrayDeque<AccessibilityNodeInfo>(); q.add(root); while (q.isNotEmpty()) { val n=q.removeFirst(); all.add(n); repeat(n.childCount) { n.getChild(it)?.let(q::add) } }; return all }
+    private fun nodes(): List<AccessibilityNodeInfo> { instrumentation.uiAutomation.clearCache(); val root = instrumentation.uiAutomation.rootInActiveWindow ?: return emptyList(); val all = mutableListOf<AccessibilityNodeInfo>(); val q = ArrayDeque<AccessibilityNodeInfo>(); q.add(root); while (q.isNotEmpty()) { val n=q.removeFirst(); all.add(n); repeat(n.childCount) { n.getChild(it)?.let(q::add) } }; return all }
     private fun node(label: String): AccessibilityNodeInfo { repeat(30) { nodes().firstOrNull { (it.text?.toString()==label || it.contentDescription?.toString()==label) && it.isVisibleToUser }?.let { return it }; SystemClock.sleep(100) }; error("Missing $label: ${nodes().mapNotNull { it.text ?: it.contentDescription }}") }
     private fun click(label: String) { val rect=Rect(); node(label).getBoundsInScreen(rect); val start=SystemClock.uptimeMillis(); listOf(MotionEvent.ACTION_DOWN,MotionEvent.ACTION_UP).forEach { action -> val e=MotionEvent.obtain(start,SystemClock.uptimeMillis(),action,rect.centerX().toFloat(),rect.centerY().toFloat(),0); e.source=InputDevice.SOURCE_TOUCHSCREEN; instrumentation.uiAutomation.injectInputEvent(e,true); e.recycle(); SystemClock.sleep(60) }; SystemClock.sleep(220) }
     private fun shot(name: String) { val folder=File(context.getExternalFilesDir(null),"ui-fixture").apply { mkdirs() }; instrumentation.uiAutomation.takeScreenshot().also { bitmap -> File(folder,"$name.png").outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it) }; bitmap.recycle() } }

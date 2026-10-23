@@ -17,6 +17,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.activity.compose.LocalActivity
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.core.view.WindowCompat
 import androidx.compose.ui.text.font.FontWeight
@@ -30,16 +32,23 @@ import com.eddyizm.tempus.jiayin.playback.PlaybackHub
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 
+
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable fun JiayinApp(vm: JiayinViewModel, openPlayer: Boolean) {
     val ui by vm.state.collectAsState()
+    val searchState by vm.search.collectAsState()
+    var searchReturn by remember { mutableStateOf(vm.searchOrigin) }
     val playback by PlaybackHub.state.collectAsState()
     var route by rememberSaveable { mutableStateOf("home") }
     var previousRoute by rememberSaveable { mutableStateOf("home") }
     var player by rememberSaveable { mutableStateOf(openPlayer) }
+    val keyboard = LocalSoftwareKeyboardController.current
+    val focus = LocalFocusManager.current
+    val showPlayer = { keyboard?.hide(); focus.clearFocus(); player = true }
     var miniQueue by remember { mutableStateOf(false) }
+    SideEffect { vm.searchOrigin = searchReturn }
     val playerRequest by vm.playerRequests.collectAsState()
-    LaunchedEffect(playerRequest) { if (playerRequest > 0) player = true }
+    LaunchedEffect(playerRequest) { if (playerRequest > 0) showPlayer() }
     var collection by remember { mutableStateOf(vm.selectedCollection) }
     var parentCollection by remember { mutableStateOf<MusicList?>(null) }
     var menuTrack by remember { mutableStateOf<Track?>(null) }
@@ -57,19 +66,31 @@ import kotlinx.coroutines.flow.map
         else lightColorScheme(surfaceContainerLow = androidx.compose.ui.graphics.Color(0xFFF0F2EC), surfaceContainerHigh = androidx.compose.ui.graphics.Color(0xFFE7ECE4), surfaceTint = HomeGreen, primary = HomeGreen, primaryContainer = androidx.compose.ui.graphics.Color(0xFFDDE7DB), secondaryContainer = androidx.compose.ui.graphics.Color(0xFFE2E9DF), onPrimaryContainer = androidx.compose.ui.graphics.Color(0xFF253C2F), onSecondaryContainer = androidx.compose.ui.graphics.Color(0xFF253C2F), background = Paper, surface = Paper, surfaceVariant = androidx.compose.ui.graphics.Color(0xFFE6EAE3), onBackground = androidx.compose.ui.graphics.Color(0xFF20241F), onSurface = androidx.compose.ui.graphics.Color(0xFF20241F))
     LaunchedEffect(ui.message) { ui.message?.let { snack.showSnackbar(it); vm.consumedMessage() } }
     LaunchedEffect(route) { vm.watchDownloads(route == "downloads") }
+    val restoreSearch: () -> Unit = {
+        searchReturn?.let { origin ->
+            route = origin.route; previousRoute = origin.previous; collection = origin.collection; vm.selectedCollection = collection; parentCollection = origin.parent
+            vm.restoreBrowser(origin.category, origin.folder)
+        }
+        searchReturn = null; vm.resumeSearch()
+    }
+    val openSearch: (SearchScope) -> Unit = { pageStates.removeState(vm.repo.account + ":independent-search"); searchReturn = null; vm.openSearch(it) }
     val backCollection: () -> Unit = {
         val parent = parentCollection
         if (parent != null) { collection = parent; vm.selectedCollection = parent; parentCollection = null }
+        else if (searchReturn != null) restoreSearch()
         else route = previousRoute.takeIf { it != "detail" } ?: "library"
     }
     val openCollection: (MusicList) -> Unit = {
-        if (route == "detail") parentCollection = collection else { previousRoute = route; parentCollection = null }
+        if (searchState.active) {
+            searchReturn = SearchReturnLocation(route, previousRoute, collection, parentCollection, vm.repo.settings.getString("${vm.repo.account}.browse-library-category", "专辑") ?: "专辑", vm.repo.settings.getString("${vm.repo.account}.browse-folder", "").orEmpty())
+            vm.hideSearch(); previousRoute = route; parentCollection = null
+        } else if (route == "detail") parentCollection = collection else { previousRoute = route; parentCollection = null }
         collection = it; vm.selectedCollection = it; route = "detail"
     }
     val openRoute: (String) -> Unit = { previousRoute = route; route = it }
     LaunchedEffect(route, collection) { if (route == "detail" && collection == null) route = "library" }
-    BackHandler(player || route !in listOf("home", "library", "search", "my")) {
-        if (player) player = false else if (route == "detail") backCollection() else route = previousRoute.takeIf { it != "detail" } ?: "home"
+    BackHandler(player || searchState.active || searchReturn != null || route !in listOf("home", "library", "search", "my")) {
+        if (player) player = false else if (searchState.active) vm.hideSearch() else if (route == "detail") backCollection() else route = previousRoute.takeIf { it != "detail" } ?: "home"
     }
     MaterialTheme(colorScheme = colors, typography = Typography()) {
         Surface(Modifier.fillMaxSize()) {
@@ -78,32 +99,52 @@ import kotlinx.coroutines.flow.map
                 Scaffold(modifier = if (player) Modifier.clearAndSetSemantics { } else Modifier,
                     snackbarHost = { SnackbarHost(snack) },
                     bottomBar = {
-                        Column {
-                            if (playback.current != null) MiniPlayer(playback, { player = true }, { vm.command("toggle") }, { miniQueue = true }, visible = !player)
-                            NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 0.dp) {
+                        Column(if (searchState.active) Modifier.imePadding().navigationBarsPadding() else Modifier) {
+                            if (playback.current != null) MiniPlayer(playback, showPlayer, { vm.command("toggle") }, { miniQueue = true }, visible = !player)
+                            if (!searchState.active) NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 0.dp) {
                                 listOf(Triple("home", "首页", R.drawable.ic_home), Triple("library", "曲库", R.drawable.ic_albums), Triple("search", "搜索", R.drawable.ic_search), Triple("my", "我的", R.drawable.ic_favorite)).forEach { (id, label, icon) ->
-                                    NavigationBarItem(route == id, { route = id }, icon = { AppIcon(icon, label) }, label = { Text(label, fontSize = 12.sp) })
+                                    NavigationBarItem(route == id, { searchReturn = null; route = id }, icon = { AppIcon(icon, label) }, label = { Text(label, fontSize = 12.sp) })
                                 }
                             }
                         }
                     }
                 ) { padding ->
                     Box(Modifier.fillMaxSize().padding(padding)) {
-                        pageStates.SaveableStateProvider(if (route == "detail") "detail:${collection?.id}" else route) { when (route) {
-                            "home" -> HomePage(ui, vm, openCollection, openRoute, { player = true }, { menuTrack = it }, { newPlaylist = true })
-                            "library" -> LibraryPage(ui, vm, openCollection, { menuTrack = it })
-                            "search" -> SearchPage(ui, vm, openCollection, { menuTrack = it })
+                        Box(if (searchState.active) Modifier.fillMaxSize().clearAndSetSemantics { } else Modifier.fillMaxSize()) {
+                        if (!searchState.active) pageStates.SaveableStateProvider(vm.repo.account + ":" + if (route == "detail") "detail:${collection?.id}" else route) { when (route) {
+                            "home" -> HomePage(ui, vm, openCollection, openRoute, showPlayer, { menuTrack = it }, { newPlaylist = true })
+                            "library" -> LibraryPage(ui, vm, openCollection, { menuTrack = it }, openSearch, searchReturn?.entryFolder, restoreSearch)
+                            "search" -> SearchBrowser(ui, vm, openCollection, openSearch)
                             "my" -> MyPage(ui, vm, openCollection, openRoute, { newPlaylist = true })
                             "recommend" -> RecommendationPage(ui, vm, { menuTrack = it })
                             "detail" -> collection?.let { c ->
                                 val actual = ui.library.playlists.find { it.id == c.id } ?: c
-                                if (actual.id.startsWith("artist:") || actual.id.startsWith("歌手:")) ArtistPage(actual, ui, vm, backCollection, { menuTrack = it }, openCollection)
+                                if (actual.id.startsWith("artist:") || actual.id.startsWith("歌手:")) ArtistPage(actual, ui, vm, backCollection, { menuTrack = it }, openCollection, openSearch)
                                 else CollectionPage(actual, ui, vm, backCollection, { menuTrack = it }, { renameList = actual }, { collection = it })
                             }
                             "history" -> TrackPage("最近听过", ui.library.tracks.sortedByDescending { ui.records[it.id]?.lastHeard ?: 0 }.filter { (ui.records[it.id]?.lastHeard ?: 0) > 0 }, ui, vm, { route = "my" }, { menuTrack = it })
                             "settings" -> SettingsPage(vm, ui, theme ?: "system", { theme = it }, { route = "my" })
                             "downloads" -> DownloadsPage(ui, vm, { menuTrack = it }, { route = "my" })
                         } }
+                        }
+                        if (searchState.active) pageStates.SaveableStateProvider(vm.repo.account + ":independent-search") { DedicatedSearch(ui, searchState, vm, { hit ->
+                            if (hit.kind == SearchKind.SONGS) {
+                                val songs = searchState.hits.filter { it.kind == SearchKind.SONGS }.mapNotNull { ui.index.tracks[it.id] }
+                                vm.start(songs, source = "搜索：${searchState.query}", index = songs.indexOfFirst { it.id == hit.id }.coerceAtLeast(0))
+                            } else {
+                                searchReturn = SearchReturnLocation(route, previousRoute, collection, parentCollection, vm.repo.settings.getString("${vm.repo.account}.browse-library-category", "专辑") ?: "专辑", vm.repo.settings.getString("${vm.repo.account}.browse-folder", "").orEmpty(), hit.folder.takeIf { hit.kind == SearchKind.FOLDERS })
+                                vm.hideSearch()
+                                if (hit.kind == SearchKind.FOLDERS) { route = "library"; vm.requestFolder(hit.folder.orEmpty()) }
+                                else {
+                                    val target = when (hit.kind) {
+                                        SearchKind.ARTISTS -> MusicList("artist:${hit.id}", hit.title, hit.tracks, hit.cover)
+                                        SearchKind.PLAYLISTS -> ui.library.playlists.find { it.id == hit.id } ?: MusicList(hit.id, hit.title, hit.tracks, hit.cover)
+                                        else -> MusicList("album:${hit.id}", hit.title, hit.tracks, hit.cover)
+                                    }
+                                    previousRoute = route; parentCollection = null; collection = target; vm.selectedCollection = target; route = "detail"
+                                }
+                            }
+                        }, { menuTrack = it }) }
                         if (ui.loading) LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter))
                     }
                 }
