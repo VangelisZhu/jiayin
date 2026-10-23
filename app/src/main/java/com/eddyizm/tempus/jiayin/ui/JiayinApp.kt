@@ -41,6 +41,7 @@ import kotlinx.coroutines.flow.map
     val playerRequest by vm.playerRequests.collectAsState()
     LaunchedEffect(playerRequest) { if (playerRequest > 0) player = true }
     var collection by remember { mutableStateOf(vm.selectedCollection) }
+    var parentCollection by remember { mutableStateOf<MusicList?>(null) }
     var menuTrack by remember { mutableStateOf<Track?>(null) }
     var playlistTarget by remember { mutableStateOf<Track?>(null) }
     var newPlaylist by remember { mutableStateOf(false) }
@@ -56,11 +57,19 @@ import kotlinx.coroutines.flow.map
         else lightColorScheme(surfaceContainerLow = androidx.compose.ui.graphics.Color(0xFFF0F2EC), surfaceContainerHigh = androidx.compose.ui.graphics.Color(0xFFE7ECE4), surfaceTint = HomeGreen, primary = HomeGreen, primaryContainer = androidx.compose.ui.graphics.Color(0xFFDDE7DB), secondaryContainer = androidx.compose.ui.graphics.Color(0xFFE2E9DF), onPrimaryContainer = androidx.compose.ui.graphics.Color(0xFF253C2F), onSecondaryContainer = androidx.compose.ui.graphics.Color(0xFF253C2F), background = Paper, surface = Paper, surfaceVariant = androidx.compose.ui.graphics.Color(0xFFE6EAE3), onBackground = androidx.compose.ui.graphics.Color(0xFF20241F), onSurface = androidx.compose.ui.graphics.Color(0xFF20241F))
     LaunchedEffect(ui.message) { ui.message?.let { snack.showSnackbar(it); vm.consumedMessage() } }
     LaunchedEffect(route) { vm.watchDownloads(route == "downloads") }
-    val openCollection: (MusicList) -> Unit = { collection = it; vm.selectedCollection = it; previousRoute = route; route = "detail" }
+    val backCollection: () -> Unit = {
+        val parent = parentCollection
+        if (parent != null) { collection = parent; vm.selectedCollection = parent; parentCollection = null }
+        else route = previousRoute.takeIf { it != "detail" } ?: "library"
+    }
+    val openCollection: (MusicList) -> Unit = {
+        if (route == "detail") parentCollection = collection else { previousRoute = route; parentCollection = null }
+        collection = it; vm.selectedCollection = it; route = "detail"
+    }
     val openRoute: (String) -> Unit = { previousRoute = route; route = it }
     LaunchedEffect(route, collection) { if (route == "detail" && collection == null) route = "library" }
     BackHandler(player || route !in listOf("home", "library", "search", "my")) {
-        if (player) player = false else route = previousRoute.takeIf { it != "detail" } ?: "home"
+        if (player) player = false else if (route == "detail") backCollection() else route = previousRoute.takeIf { it != "detail" } ?: "home"
     }
     MaterialTheme(colorScheme = colors, typography = Typography()) {
         Surface(Modifier.fillMaxSize()) {
@@ -88,7 +97,8 @@ import kotlinx.coroutines.flow.map
                             "recommend" -> RecommendationPage(ui, vm, { menuTrack = it })
                             "detail" -> collection?.let { c ->
                                 val actual = ui.library.playlists.find { it.id == c.id } ?: c
-                                CollectionPage(actual, ui, vm, { route = previousRoute }, { menuTrack = it }, { renameList = actual }, { collection = it })
+                                if (actual.id.startsWith("artist:") || actual.id.startsWith("歌手:")) ArtistPage(actual, ui, vm, backCollection, { menuTrack = it }, openCollection)
+                                else CollectionPage(actual, ui, vm, backCollection, { menuTrack = it }, { renameList = actual }, { collection = it })
                             }
                             "history" -> TrackPage("最近听过", ui.library.tracks.sortedByDescending { ui.records[it.id]?.lastHeard ?: 0 }.filter { (ui.records[it.id]?.lastHeard ?: 0) > 0 }, ui, vm, { route = "my" }, { menuTrack = it })
                             "settings" -> SettingsPage(vm, ui, theme ?: "system", { theme = it }, { route = "my" })
@@ -98,7 +108,7 @@ import kotlinx.coroutines.flow.map
                     }
                 }
                 AnimatedVisibility(player, enter = fadeIn(tween(220)) + slideInVertically(tween(220)) { it / 6 }, exit = fadeOut(tween(220)) + slideOutVertically(tween(220)) { it / 6 }) {
-                    FullPlayer(ui, playback, vm, dark, { player = false })
+                    FullPlayer(ui, playback, vm, dark, { player = false }, { playlistTarget = it }, { song -> player = false; openCollection(artistCollection(song, ui.library.tracks)) })
                 }
                 if (player) SnackbarHost(snack, Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(16.dp))
                 if (miniQueue) QueueSheet(ui, playback, vm) { miniQueue = false }
@@ -211,7 +221,7 @@ import kotlinx.coroutines.flow.map
             } }
             item {
                 Row(Modifier.padding(horizontal = 24.dp, vertical = 18.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    FilledTonalButton({ vm.start(tracks, true, "全库随机"); player() }, Modifier.weight(1f).height(52.dp)) { AppIcon(R.drawable.ic_shuffle, "随机"); Spacer(Modifier.width(8.dp)); Text("随便听听") }
+                    FilledTonalButton({ vm.discover(); player() }, Modifier.weight(1f).height(52.dp)) { AppIcon(R.drawable.ic_shuffle, "随机"); Spacer(Modifier.width(8.dp)); Text("随便听听") }
                     OutlinedButton({ collection(MusicList("favorites", "我喜欢", tracks.filter { it.starred }.map { it.id })) }, Modifier.weight(1f).height(52.dp)) { AppIcon(R.drawable.ic_favorite, "喜欢"); Spacer(Modifier.width(8.dp)); Text("我喜欢") }
                 }
             }

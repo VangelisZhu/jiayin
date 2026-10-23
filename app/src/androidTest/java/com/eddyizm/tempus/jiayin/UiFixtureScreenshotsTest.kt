@@ -93,8 +93,10 @@ class UiFixtureScreenshotsTest {
                 click("Evening Letters"); SystemClock.sleep(600)
                 // Mini player title and continue-listening card both open the player.
                 if (!contains("正在播放")) click("Evening Letters")
-                SystemClock.sleep(1000); shot("03-vinyl-cool")
-                click("歌词"); SystemClock.sleep(1000); shot("04-bilingual")
+                SystemClock.sleep(1000)
+                if (!contains("打开歌词")) click("唱片")
+                SystemClock.sleep(500); shot("03-vinyl-cool")
+                click("打开歌词"); SystemClock.sleep(1000); shot("04-bilingual")
                 click("队列"); SystemClock.sleep(600); shot("05-queue")
                 instrumentation.uiAutomation.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK)
                 SystemClock.sleep(500)
@@ -116,7 +118,7 @@ class UiFixtureScreenshotsTest {
         }
     }
     private fun miniBitmap(): Bitmap {
-        val n = nodes().first { it.contentDescription?.toString() == "迷你唱片" }
+        val n = findNode("迷你唱片") ?: error("Mini record is missing after the accessibility tree settled")
         val bounds = Rect(); n.getBoundsInScreen(bounds)
         val screen = instrumentation.uiAutomation.takeScreenshot()
         val crop = Bitmap.createBitmap(screen, bounds.centerX() - 30, bounds.centerY() - 30, 60, 60)

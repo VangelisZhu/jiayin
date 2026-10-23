@@ -39,6 +39,11 @@ import kotlinx.coroutines.withContext
             }
         }
         item { SheetActionPadded("我喜欢 · ${ui.library.tracks.count { it.starred }} 首", R.drawable.ic_favorite) { collection(MusicList("favorites", "我喜欢", ui.library.tracks.filter { it.starred }.map { it.id })) } }
+        item { SectionTitle("收藏的歌手") }
+        items(ui.artists.values.filter { it.starred }.sortedBy { it.name }, key = { it.id }) { p ->
+            val tracks = ui.library.tracks.filter { artistKey(it) == p.id }
+            ListItem(headlineContent = { Text(p.name) }, supportingContent = { Text("${tracks.size} 首") }, modifier = Modifier.clickable { collection(MusicList("artist:${p.id}", p.name, tracks.map { it.id }, tracks.firstOrNull()?.cover.orEmpty())) })
+        }
         item { SheetActionPadded("最近听过", R.drawable.ic_timer) { route("history") } }
         item { SheetActionPadded("下载与离线", R.drawable.ic_download) { route("downloads") } }
         item { SectionTitle("我的歌单", "新建", newPlaylist) }
@@ -108,28 +113,46 @@ import kotlinx.coroutines.withContext
 @Composable fun DownloadsPage(ui: HomeState, vm: JiayinViewModel, menu: (Track) -> Unit, back: () -> Unit) {
     val byId = remember(ui.library.tracks) { ui.library.tracks.associateBy { it.id } }
     val downloaded = ui.downloads.filter { it.state == Download.STATE_COMPLETED }
-    var remove by remember { mutableStateOf<String?>(null) }
-    LazyColumn {
-        item { PageTitle("下载与离线", "${downloaded.size} 首已下载 · ${ui.downloads.sumOf { it.bytes } / 1024 / 1024} MB", back) }
-        item { Row(Modifier.padding(horizontal = 24.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) { Button({ vm.start(downloaded.mapNotNull { byId[it.id] }, source = "已下载") }) { Text("离线播放") }; OutlinedButton({ vm.start(downloaded.mapNotNull { byId[it.id] }, true, "下载随机") }) { AppIcon(R.drawable.ic_shuffle, "随机"); Text("随机播放") } } }
+    var remove by remember { mutableStateOf<Set<String>?>(null) }
+    var selecting by remember { mutableStateOf(false) }
+    var selected by remember { mutableStateOf(emptySet<String>()) }
+    LaunchedEffect(ui.downloads.map { it.id }) { selected = selected.intersect(ui.downloads.map { it.id }.toSet()) }
+    Column(Modifier.fillMaxSize()) {
+        PageTitle("下载与离线", "${downloaded.size} 首已下载 · ${ui.downloads.sumOf { it.bytes } / 1024 / 1024} MB", back)
+        Row(Modifier.padding(horizontal = 24.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) { Button({ vm.start(downloaded.mapNotNull { byId[it.id] }, source = "已下载") }) { Text("离线播放") }; OutlinedButton({ vm.start(downloaded.mapNotNull { byId[it.id] }, true, "下载随机") }) { AppIcon(R.drawable.ic_shuffle, "随机"); Text("随机播放") } }
+        FlowRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+            TextButton({ vm.pauseAllDownloads(true) }, enabled = ui.downloads.any { it.state != Download.STATE_COMPLETED }) { Text("全部暂停") }
+            TextButton({ vm.pauseAllDownloads(false) }, enabled = ui.downloads.isNotEmpty()) { Text("全部继续") }
+            TextButton({ selecting = !selecting; selected = emptySet() }) { Text(if (selecting) "取消选择" else "批量管理") }
+        }
+        if (selecting) FlowRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+            TextButton({ selected = ui.downloads.map { it.id }.toSet() }) { Text("全选") }
+            TextButton({ selected = emptySet() }) { Text("清空选择") }
+            TextButton({ remove = selected.toSet() }, enabled = selected.isNotEmpty()) { Text("删除所选 ${selected.size}") }
+            TextButton({ remove = ui.downloads.map { it.id }.toSet() }, enabled = ui.downloads.isNotEmpty()) { Text("删除全部") }
+        }
+        LazyColumn(Modifier.weight(1f)) {
         item { Text("默认仅 Wi-Fi 下载。已下载音乐和缓存歌词在无网络时仍可使用。", Modifier.padding(24.dp), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         if (ui.downloads.isEmpty()) item { EmptyState("让音乐陪你离线", "在歌曲菜单或歌单页面点下载。") }
         items(ui.downloads, key = { it.id }) { d ->
             val t = byId[d.id]
             Column {
                 Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (selecting) Checkbox(d.id in selected, { selected = if (d.id in selected) selected - d.id else selected + d.id })
                     Cover(t?.cover.orEmpty(), Modifier.size(48.dp), 10)
-                    Column(Modifier.weight(1f).clickable { if (d.state == Download.STATE_COMPLETED && t != null) vm.start(downloaded.mapNotNull { byId[it.id] }, source = "已下载", index = downloaded.indexOf(d)) }.padding(horizontal = 12.dp, vertical = 16.dp)) {
+                    Column(Modifier.weight(1f).clickable { if (selecting) selected = if (d.id in selected) selected - d.id else selected + d.id
+                        else if (d.state == Download.STATE_COMPLETED && t != null) { val playable = downloaded.mapNotNull { byId[it.id] }; vm.start(playable, source = "已下载", index = playable.indexOfFirst { it.id == t.id }) } }.padding(horizontal = 12.dp, vertical = 16.dp)) {
                         Text(t?.title ?: d.id, maxLines = 1, fontSize = 14.sp)
                         Text(when (d.state) { Download.STATE_COMPLETED -> "已下载 · ${d.bytes / 1024 / 1024} MB"; Download.STATE_DOWNLOADING -> "下载中 ${d.progress.toInt()}%"; Download.STATE_FAILED -> "下载失败，点重试"; Download.STATE_STOPPED -> "已暂停"; Download.STATE_REMOVING -> "正在移除"; else -> "等待网络 / 排队中" }, Modifier.padding(top = 5.dp), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     if (d.state == Download.STATE_FAILED) TextButton({ if (t != null) vm.download(listOf(t)) }) { Text("重试") }
                     else if (d.state != Download.STATE_COMPLETED) IconAction(if (d.state == Download.STATE_STOPPED) R.drawable.ic_play else R.drawable.ic_pause, "暂停或继续下载") { vm.pauseDownload(d.id, d.state != Download.STATE_STOPPED) }
-                    IconAction(R.drawable.ic_close, "取消或删除下载") { remove = d.id }
+                    IconAction(R.drawable.ic_close, "取消或删除下载") { remove = setOf(d.id) }
                 }
                 if (d.state == Download.STATE_DOWNLOADING) LinearProgressIndicator(progress = { d.progress / 100f }, modifier = Modifier.fillMaxWidth().padding(start = 84.dp, end = 24.dp))
             }
         }
     }
-    remove?.let { id -> AlertDialog(onDismissRequest = { remove = null }, title = { Text("移除此下载？") }, text = { Text("移除手机上的下载，NAS 原文件会保留。") }, confirmButton = { TextButton({ vm.removeDownload(id); remove = null }) { Text("移除") } }, dismissButton = { TextButton({ remove = null }) { Text("取消") } }) }
+    }
+    remove?.let { ids -> AlertDialog(onDismissRequest = { remove = null }, title = { Text("移除 ${ids.size} 首下载？") }, text = { Text("移除手机上的下载，NAS 原文件会保留。") }, confirmButton = { TextButton({ vm.removeDownloads(ids); selected = selected - ids; remove = null }) { Text("移除") } }, dismissButton = { TextButton({ remove = null }) { Text("取消") } }) }
 }

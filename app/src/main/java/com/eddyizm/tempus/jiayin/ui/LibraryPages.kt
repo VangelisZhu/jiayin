@@ -74,7 +74,7 @@ import sh.calvin.reorderable.*
             else -> {
                 val folders = remember(sorted, category) { sorted.groupBy { if (category == "歌手") it.artist else it.path.substringBeforeLast('/', "music") }.toSortedMap() }
                 LazyColumn {
-                    items(folders.entries.toList(), key = { it.key }) { group -> ListItem(headlineContent = { Text(group.key, maxLines = 2) }, supportingContent = { Text("${group.value.size} 首歌曲") }, leadingContent = { if (category == "歌手") Cover(group.value.first().cover, Modifier.size(54.dp), 27) else AppIcon(R.drawable.ic_folder, "文件夹") }, modifier = Modifier.clickable { collection(MusicList("$category:${group.key}", group.key, group.value.map { it.id }, group.value.first().cover)) }) }
+                    items(folders.entries.toList(), key = { it.key }) { group -> ListItem(headlineContent = { Text(group.key, maxLines = 2) }, supportingContent = { Text("${group.value.size} 首歌曲") }, leadingContent = { if (category == "歌手") Cover(group.value.first().cover, Modifier.size(54.dp), 27) else AppIcon(R.drawable.ic_folder, "文件夹") }, modifier = Modifier.clickable { collection(if (category == "歌手") artistCollection(group.value.first(), tracks) else MusicList("$category:${group.key}", group.key, group.value.map { it.id }, group.value.first().cover)) }) }
                 }
             }
         } }
@@ -125,20 +125,58 @@ import sh.calvin.reorderable.*
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable fun SearchPage(ui: HomeState, vm: JiayinViewModel, collection: (MusicList) -> Unit, menu: (Track) -> Unit) {
     var query by rememberSaveable { mutableStateOf("") }
+    var category by rememberSaveable { mutableStateOf("歌曲") }
+    var region by rememberSaveable { mutableStateOf("全部") }
+    var type by rememberSaveable { mutableStateOf("全部") }
+    var genre by rememberSaveable { mutableStateOf("全部") }
     var debounced by remember { mutableStateOf("") }
     LaunchedEffect(query) { kotlinx.coroutines.delay(180); debounced = query.trim() }
-    val results = remember(ui.library.tracks, debounced) { if (debounced.isBlank()) emptyList() else ui.library.tracks.filter { "${it.title} ${it.artist} ${it.album}".contains(debounced, true) } }
-    Column {
-        PageTitle("搜索", "找一首，想听的歌")
-        OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth().padding(horizontal = 24.dp), singleLine = true, placeholder = { Text("歌曲、歌手、专辑") }, leadingIcon = { AppIcon(R.drawable.ic_search, "搜索") }, trailingIcon = { if (query.isNotEmpty()) IconAction(R.drawable.ic_close, "清空") { query = "" } }, shape = RoundedCornerShape(18.dp))
-        if (debounced.isBlank()) {
-            SectionTitle("随时想听")
-            SheetActionPadded("我喜欢", R.drawable.ic_favorite) { collection(MusicList("favorites", "我喜欢", ui.library.tracks.filter { it.starred }.map { it.id })) }
-            SheetActionPadded("全库随机", R.drawable.ic_shuffle) { vm.start(ui.library.tracks, true, "全库随机") }
-        } else LazyColumn(contentPadding = PaddingValues(top = 16.dp)) {
-            item { Text("找到 ${results.size} 首歌曲", Modifier.padding(horizontal = 24.dp, vertical = 12.dp), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-            if (results.isEmpty()) item { EmptyState("没有找到", "试试歌曲名、歌手或专辑名的一部分。") }
-            items(results, key = { it.id }) { t -> SongRow(t, action = { vm.start(results, source = "搜索：$debounced", index = results.indexOf(t)) }, more = { menu(t) }) }
+    val all = ui.library.tracks
+    val genres = remember(all) { all.map { it.genre.ifBlank { "未分类" } }.distinct().sorted() }
+    val results = remember(all, debounced, genre) { all.filter { (genre == "全部" || it.genre.ifBlank { "未分类" } == genre) && "${it.title} ${it.artist} ${it.album} ${it.genre}".contains(debounced, true) } }
+    Column(Modifier.fillMaxSize()) {
+        PageTitle("搜索", "从曲风或歌手，发现想听的歌")
+        OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth().padding(horizontal = 24.dp), singleLine = true, placeholder = { Text("歌曲、歌手、专辑、曲风") }, leadingIcon = { AppIcon(R.drawable.ic_search, "搜索") }, trailingIcon = { if (query.isNotEmpty()) IconAction(R.drawable.ic_close, "清空") { query = "" } }, shape = RoundedCornerShape(18.dp))
+        FilterChips(listOf("歌曲", "曲风", "歌手"), category) { category = it }
+        when (category) {
+            "歌手" -> {
+                FilterChips(listOf("全部", "华语", "欧美", "日本", "韩国", "其他", "未分类"), region) { region = it }
+                FilterChips(listOf("全部", "男", "女", "乐队/组合", "未分类"), type) { type = it }
+                Text("缺少地区和类型时显示未分类，可在歌手主页设置。", Modifier.padding(horizontal = 24.dp), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                val groups = remember(all) { all.groupBy { artistKey(it) }.values.sortedBy { it.first().artist.lowercase() } }
+                LazyColumn(Modifier.weight(1f)) {
+                    items(groups.filter { group -> val p = vm.artistProfile(group.first()); p.name.contains(debounced, true) && (region == "全部" || p.region == region) && (type == "全部" || p.type == type) }, key = { artistKey(it.first()) }) { group ->
+                        val t = group.first(); val p = vm.artistProfile(t)
+                        ListItem(headlineContent = { Text(t.artist) }, supportingContent = { Text("${group.size} 首 · ${p.region} · ${p.type}") }, leadingContent = { Cover(t.cover, Modifier.size(54.dp), 27) }, trailingContent = { TextButton({ vm.favoriteArtist(p) }) { Text(if (p.starred) "已收藏" else "收藏") } }, modifier = Modifier.clickable { collection(artistCollection(t, all)) })
+                    }
+                }
+            }
+            "曲风" -> Row(Modifier.weight(1f)) {
+                LazyColumn(Modifier.widthIn(max = 108.dp).fillMaxHeight().background(MaterialTheme.colorScheme.surfaceContainerLow)) {
+                    items(listOf("全部") + genres) { name -> Text(name, Modifier.fillMaxWidth().background(if (genre == name) MaterialTheme.colorScheme.secondaryContainer else androidx.compose.ui.graphics.Color.Transparent).clickable { genre = name }.padding(16.dp), fontSize = 13.sp) }
+                }
+                LazyColumn(Modifier.weight(1f)) {
+                    item { Text(if (genre == "全部") "曲库中的曲风" else genre, Modifier.padding(20.dp), style = MaterialTheme.typography.titleMedium) }
+                    if (genre == "全部") items(genres.filter { it.contains(debounced, true) }) { name ->
+                        val matches = all.filter { it.genre.ifBlank { "未分类" } == name }
+                        ListItem(headlineContent = { Text(name) }, supportingContent = { Text("${matches.size} 首") }, trailingContent = { IconAction(R.drawable.ic_play, "播放$name") { vm.start(matches, true, name) } }, modifier = Modifier.clickable { genre = name })
+                    } else {
+                        item { TextButton({ vm.start(results, true, genre) }) { Text("随机播放 · ${results.size} 首") } }
+                        items(results, key = { it.id }) { t -> SongRow(t, action = { vm.start(results, source = genre, index = results.indexOf(t)) }, more = { menu(t) }) }
+                    }
+                }
+            }
+            else -> LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(top = 16.dp)) {
+                if (debounced.isBlank()) {
+                    item { SheetActionPadded("我喜欢", R.drawable.ic_favorite) { collection(MusicList("favorites", "我喜欢", all.filter { it.starred }.map { it.id })) } }
+                    item { SheetActionPadded("随便听听 · 发现未收藏的歌", R.drawable.ic_shuffle) { vm.discover() } }
+                } else {
+                    val songs = all.filter { "${it.title} ${it.artist} ${it.album} ${it.genre}".contains(debounced, true) }
+                    item { Text("找到 ${songs.size} 首歌曲", Modifier.padding(horizontal = 24.dp, vertical = 12.dp), fontSize = 12.sp) }
+                    if (songs.isEmpty()) item { EmptyState("没有找到", "试试歌曲、歌手、专辑或曲风的一部分。") }
+                    items(songs, key = { it.id }) { t -> SongRow(t, action = { vm.start(songs, source = "搜索：$debounced", index = songs.indexOf(t)) }, more = { menu(t) }) }
+                }
+            }
         }
     }
 }

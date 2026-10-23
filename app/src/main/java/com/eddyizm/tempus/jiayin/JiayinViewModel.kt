@@ -28,6 +28,7 @@ data class DownloadInfo(val id: String, val progress: Float, val state: Int, val
 data class HomeState(
     val configured: Boolean = false, val loading: Boolean = true, val status: String = "正在读取曲库",
     val library: Library = Library(), val records: Map<String, Listening> = emptyMap(),
+    val artists: Map<String, ArtistProfile> = emptyMap(), val topSongs: Map<String, List<String>> = emptyMap(),
     val recommendations: List<Recommendation> = emptyList(), val downloads: List<DownloadInfo> = emptyList(),
     val pending: Int = 0, val connection: String = "尚未测试连接", val message: String? = null, val lyrics: Lyrics? = null,
     val lyricsBusy: Boolean = false, val lyricMatches: List<LyricMatch> = emptyList(),
@@ -46,12 +47,16 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
     private var lyricJob: Job? = null
     private var downloadJob: Job? = null
     private var batch = 0L
+    private var downloadEpoch = 0L
+    private val artistRequests = mutableSetOf<String>()
+    private var discoveryJob: Job? = null
     var selectedCollection: MusicList? = null
     init {
         viewModelScope.launch {
             withContext(Dispatchers.IO) { repo.bindUpstream() }
             refreshLocal(); if (repo.configured) { connect(); sync() } else mutable.update { it.copy(loading = false) }
         }
+        viewModelScope.launch { PlaybackHub.libraryRevision.collect { if (it > 0) refreshLocal() } }
         viewModelScope.launch { PlaybackHub.state.map { it.error }.distinctUntilChanged().collect { error -> error?.let { message(it) } } }
         viewModelScope.launch { PlaybackHub.state.map { it.current?.id }.distinctUntilChanged().collect { id ->
             lyricJob?.cancel()
@@ -72,8 +77,9 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
     }
     suspend fun refreshLocal() {
         val local = withContext(Dispatchers.IO) { Triple(repo.library(), repo.listening(), repo.dao.list(repo.account, "outbox").size) }
+        val artists = withContext(Dispatchers.IO) { repo.list("artist", ArtistProfile::class.java).associateBy { it.id } }
         val recommendations = withContext(Dispatchers.Default) { RecommendationEngine.recommend(local.first.tracks, local.second, System.currentTimeMillis() / 86_400_000 + batch) }
-        mutable.update { it.copy(configured = repo.configured, loading = false, library = local.first, records = local.second, recommendations = recommendations, pending = local.third) }
+        mutable.update { it.copy(configured = repo.configured, loading = false, library = local.first, records = local.second, artists = artists, recommendations = recommendations, pending = local.third) }
     }
     fun login(address: String, user: String, password: String) = task {
         mutable.update { it.copy(loading = true, status = "正在连接 NAS") }
@@ -110,7 +116,31 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
         withContext(Dispatchers.IO) { repo.put("command", id, queue) }
         command("start") { putString("id", id) }
     }
-    fun favorite(track: Track) = task { withContext(Dispatchers.IO) { repo.favorite(track) }; refreshLocal(); repo.syncPending(); refreshLocal() }
+    fun favorite(track: Track) = task { withContext(Dispatchers.IO) { repo.favorite(repo.library().tracks.find { it.id == track.id } ?: track) }; refreshLocal(); command("refresh-favorites"); repo.syncPending(); refreshLocal() }
+    fun discover() {
+        if (discoveryJob?.isActive == true) return
+        discoveryJob = task {
+            val snapshot = withContext(Dispatchers.IO) { Triple(repo.library(), repo.listening(), repo.get("discovery", "recent", Array<String>::class.java)?.toList().orEmpty()) }
+            val picks = withContext(Dispatchers.Default) { DiscoveryEngine.pick(snapshot.first, snapshot.second, System.nanoTime(), snapshot.third) }
+            if (picks.isEmpty()) { message("没有更多未收藏、未加入歌单的歌曲了"); return@task }
+            val byId = snapshot.first.tracks.associateBy { it.id }
+            withContext(Dispatchers.IO) { repo.put("discovery", "recent", (snapshot.third + picks.map { it.id }).takeLast(150)) }
+            mutable.update { it.copy(recommendations = picks) }
+            start(picks.mapNotNull { byId[it.id] }, source = "随便听听 · 偏好探索").join()
+            message("已挑选 ${picks.size} 首新发现；相邻 10 首歌手不重复${if (picks.size < 30) "，候选不足时保留较短队列" else ""}")
+        }
+    }
+    fun artistProfile(t: Track) = state.value.artists[artistKey(t)] ?: ArtistProfile(artistKey(t), t.artist)
+    fun favoriteArtist(profile: ArtistProfile) = task { withContext(Dispatchers.IO) { repo.favoriteArtist(profile) }; refreshLocal(); repo.syncPending(); refreshLocal() }
+    fun classifyArtist(profile: ArtistProfile, region: String, type: String) = task { withContext(Dispatchers.IO) { val latest = repo.get("artist", profile.id, ArtistProfile::class.java) ?: profile; repo.put("artist", profile.id, latest.copy(region = region, type = type)) }; refreshLocal() }
+    fun loadArtist(list: MusicList) {
+        if (!artistRequests.add(list.id)) return
+        task {
+            val ids = list.tracks.toSet()
+            val top = withContext(Dispatchers.IO) { runCatching { repo.topSongs(list.name, ids) }.getOrDefault(emptyList()) }
+            mutable.update { it.copy(topSongs = it.topSongs + (list.id to top)) }
+        }
+    }
     fun dislike(track: Track) = task { withContext(Dispatchers.IO) { repo.dislike(track.id) }; refreshLocal(); message("以后不再推荐这首歌") }
     fun recommendations(from: Track? = null) = task {
         batch++
@@ -158,6 +188,8 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun editLyrics(value: Lyrics) = task { lyricsRepo.save(value); mutable.update { it.copy(lyrics = value) } }
     fun download(tracks: List<Track>, list: MusicList? = null) = task {
+        // An explicit pause/remove invalidates a still-enqueueing batch.
+        val epoch = downloadEpoch
         // Existing Tempus downloader keeps Room + Media3 download index authoritative.
         require(tracks.isNotEmpty()) { "这里还没有可以下载的歌曲" }
         val manager = DownloadUtil.getDownloadManager(getApplication())
@@ -166,6 +198,7 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
         var queued = 0
         var refused = 0
         tracks.chunked(30).forEach { batch ->
+            if (epoch != downloadEpoch) return@task
             val children = batch.map { child(it) }
             DownloadUtil.downloadMissing(getApplication(), children, list?.id, list?.name) { count ->
                 if (count < 0) { refused++; message("下载未能启动，请在前台重试") } else queued += count
@@ -196,10 +229,21 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
     fun pauseDownload(id: String, paused: Boolean) {
         DownloadService.sendSetStopReason(getApplication(), DownloaderService::class.java, id, if (paused) 1 else Download.STOP_REASON_NONE, false)
     }
-    fun removeDownload(id: String) = task {
-        val track = state.value.library.tracks.find { it.id == id } ?: return@task
-        val row = withContext(Dispatchers.IO) { com.eddyizm.tempus.repository.DownloadRepository().getDownload(id) }
-        if (row != null) DownloadUtil.getDownloadTracker(getApplication()).remove(com.eddyizm.tempus.util.MappingUtil.mapMediaItem(child(track)), row)
+    fun pauseAllDownloads(paused: Boolean) {
+        downloadEpoch++
+        DownloadService.sendSetStopReason(getApplication(), DownloaderService::class.java, null, if (paused) 1 else Download.STOP_REASON_NONE, false)
+        if (paused) DownloadService.sendPauseDownloads(getApplication(), DownloaderService::class.java, false)
+        else DownloadService.sendResumeDownloads(getApplication(), DownloaderService::class.java, true)
+        message(if (paused) "已暂停全部下载" else "已继续全部下载")
+    }
+    fun removeDownload(id: String) = removeDownloads(setOf(id))
+    fun removeDownloads(ids: Set<String>) = task {
+        downloadEpoch++
+        // Remove by the Media3 request ID, even if the song vanished from the server library.
+        ids.forEach { id -> DownloadService.sendRemoveDownload(getApplication(), DownloaderService::class.java, id, false) }
+        withContext(Dispatchers.IO) { com.eddyizm.tempus.repository.DownloadRepository().delete(ids.toList()) }
+        mutable.update { it.copy(downloads = it.downloads.filterNot { d -> d.id in ids }) }
+        message("已移除 ${ids.size} 首手机上的下载")
     }
     fun clearHistory() = task { withContext(Dispatchers.IO) { repo.dao.clear(repo.account, "listening") }; refreshLocal(); message("收听记录与推荐偏好已清空") }
     fun message(text: String) { mutable.update { it.copy(message = text) } }

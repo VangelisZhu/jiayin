@@ -108,13 +108,31 @@ class JiayinRepository(val context: Context) {
         val local = library()
         val pendingIds = pending.mapNotNull { it.playlistId }.toSet()
         val mergedLists = playlists.filterNot { it.id in pendingIds } + local.playlists.filter { it.id in pendingIds || it.id.startsWith("local:") }
-        val favorites = pending.filter { it.method == "star" || it.method == "unstar" }.associate { it.params.getValue("id").first() to (it.method == "star") }
+        val favorites = pending.filter { (it.method == "star" || it.method == "unstar") && it.params.containsKey("id") }.associate { it.params.getValue("id").first() to (it.method == "star") }
+        // Optional metadata must never prevent the song library from being synchronized.
+        runCatching {
+            val remoteArtists = request("getArtists").getAsJsonObject("artists")?.objects("index").orEmpty().flatMap { it.objects("artist") }
+            remoteArtists.forEach { a ->
+                val id = a.str("id"); if (id.isNotBlank()) {
+                    val previous = get("artist", id, ArtistProfile::class.java)
+                    val optimistic = pending.lastOrNull { it.params["artistId"]?.firstOrNull() == id }
+                    put("artist", id, ArtistProfile(id, a.str("name"), optimistic?.let { it.method == "star" } ?: (isStarred(a)), previous?.region ?: "未分类", previous?.type ?: "未分类"))
+                }
+            }
+        }
         Library(songs.values.map { it.copy(starred = favorites[it.id] ?: it.starred) }, mergedLists, System.currentTimeMillis()).also { saveLibrary(it) }
     } }
     @Synchronized fun favorite(track: Track) {
         val lib = library(); saveLibrary(lib.copy(tracks = lib.tracks.map { if (it.id == track.id) it.copy(starred = !track.starred) else it }))
         enqueue(if (track.starred) "unstar" else "star", one("id", track.id))
     }
+    @Synchronized fun favoriteArtist(profile: ArtistProfile) {
+        val old = get("artist", profile.id, ArtistProfile::class.java) ?: profile
+        put("artist", profile.id, old.copy(starred = !old.starred))
+        if (!profile.id.startsWith("name:")) enqueue(if (old.starred) "unstar" else "star", one("artistId", profile.id))
+    }
+    fun topSongs(name: String, ids: Set<String>): List<String> = request("getTopSongs", mapOf("artist" to listOf(name), "count" to listOf("100")))
+        .getAsJsonObject("topSongs")?.objects("song").orEmpty().map { it.str("id") }.filter { it in ids }.distinct()
     @Synchronized fun setPlaylist(id: String?, name: String, ids: List<String>): MusicList {
         val listId = id ?: "local:${UUID.randomUUID()}"
         val lib = library(); val value = MusicList(listId, name, ids, pending = true)
@@ -165,7 +183,16 @@ class JiayinRepository(val context: Context) {
         @Volatile private var instance: JiayinRepository? = null
         fun get(context: Context): JiayinRepository = instance ?: synchronized(this) { instance ?: JiayinRepository(context.applicationContext).also { instance = it } }
         fun one(key: String, value: String) = mapOf(key to listOf(value))
-        fun parseTrack(o: JsonObject): Track = Track(o.str("id"), o.str("title"), o.str("artist").ifBlank { "未知歌手" }, o.str("album"), o.str("albumId"), o.str("artistId"), o.str("coverArt"), o.num("duration"), o.str("genre"), runCatching { java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US).apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }.parse(o.str("created"))?.time ?: 0 }.getOrDefault(0), o.has("starred") && !o.get("starred").isJsonNull, o.str("path"), o.num("track"), o.num("discNumber"))
+        fun parseTrack(o: JsonObject): Track = Track(o.str("id"), o.str("title"), o.str("artist").ifBlank { "未知歌手" }, o.str("album"), o.str("albumId"), o.str("artistId"), o.str("coverArt"), o.num("duration"), o.str("genre"), runCatching { java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US).apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }.parse(o.str("created"))?.time ?: 0 }.getOrDefault(0), isStarred(o), o.str("path"), o.num("track"), o.num("discNumber"), parseReleaseDate(o))
+        fun isStarred(o: JsonObject): Boolean {
+            val value = o.get("starred")?.takeIf { it.isJsonPrimitive }?.asJsonPrimitive ?: return false
+            return if (value.isBoolean) value.asBoolean else value.asString.isNotBlank()
+        }
+        fun parseReleaseDate(o: JsonObject): Long {
+            val date = o.get("originalReleaseDate")?.takeIf { it.isJsonObject }?.asJsonObject ?: o.get("releaseDate")?.takeIf { it.isJsonObject }?.asJsonObject
+            val year = date?.num("year")?.takeIf { it > 0 } ?: o.num("year")
+            return if (year > 0) year * 10000L + (date?.num("month") ?: 0) * 100 + (date?.num("day") ?: 0) else 0
+        }
     }
 }
 fun JsonObject.str(name: String): String = get(name)?.takeUnless { it.isJsonNull }?.asString.orEmpty()

@@ -6,6 +6,13 @@ import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.*
 import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.input.pointer.*
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
 import androidx.compose.foundation.shape.CircleShape
@@ -65,7 +72,7 @@ import sh.calvin.reorderable.*
     }
 }
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-@Composable fun FullPlayer(ui: HomeState, playback: PlaybackState, vm: JiayinViewModel, dark: Boolean, close: () -> Unit) {
+@Composable fun FullPlayer(ui: HomeState, playback: PlaybackState, vm: JiayinViewModel, dark: Boolean, close: () -> Unit, addToPlaylist: (Track) -> Unit = {}, artist: (Track) -> Unit = {}) {
     var lyrics by rememberSaveable { mutableStateOf(false) }
     var queue by rememberSaveable { mutableStateOf(false) }
     var timer by remember { mutableStateOf(false) }
@@ -86,7 +93,9 @@ import sh.calvin.reorderable.*
     val foreground = if (dark) Color(0xFFF2F5F1) else Color(0xFF202A28)
     BackHandler { if (lyrics) lyrics = false else close() }
     CompositionLocalProvider(LocalContentColor provides foreground) {
-        Box(Modifier.fillMaxSize()) {
+        Box(Modifier.fillMaxSize().pointerInput(Unit) {
+            awaitPointerEventScope { while (true) awaitPointerEvent(PointerEventPass.Final).changes.forEach { it.consume() } }
+        }) {
             AmbientBackground(visual, dark, lyrics, reduced)
             Column(Modifier.fillMaxSize().safeDrawingPadding()) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -102,7 +111,7 @@ import sh.calvin.reorderable.*
                     BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
                         val showHint = maxHeight >= 300.dp
                         val recordSize = minOf(maxWidth - 28.dp, maxHeight - if (showHint) 44.dp else 8.dp, 390.dp).coerceAtLeast(64.dp)
-                        if (lyrics) LyricsPanel(ui, playback, vm, foreground, reduced, { matching = true }, { i, line -> correctionIndex = i; correction = line })
+                        if (lyrics) LyricsPanel(ui, playback, vm, foreground, reduced, { matching = true }, { i, line -> correctionIndex = i; correction = line }, { lyrics = false })
                         else Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                             Vinyl(visual, playback.playing, resumed && rotate, reduced, Modifier.size(recordSize).semantics { contentDescription = "打开歌词" }.clickable { lyrics = true })
                             if (showHint) Text("轻点唱片，查看歌词", Modifier.clickable { lyrics = true }.padding(12.dp), fontSize = 11.sp, color = foreground.copy(alpha = .75f))
@@ -111,7 +120,7 @@ import sh.calvin.reorderable.*
                     Row(Modifier.fillMaxWidth().padding(start = 32.dp, end = 20.dp, top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(t.title, fontSize = 25.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            Text(t.artist, Modifier.padding(top = 9.dp), fontSize = 14.sp, color = foreground.copy(alpha = .75f))
+                            Text(t.artist, Modifier.clickable { artist(t) }.padding(top = 9.dp, bottom = 6.dp), fontSize = 14.sp, color = foreground.copy(alpha = .75f))
                         }
                         IconAction(if (actual?.starred == true) R.drawable.ic_favorite else R.drawable.ic_favorites_outlined, "喜欢", tint = foreground) { actual?.let { vm.favorite(it) } }
                     }
@@ -129,9 +138,10 @@ import sh.calvin.reorderable.*
                         IconAction(R.drawable.ic_skip_next, "下一首", tint = foreground) { vm.command("next") }
                         IconAction(if (playback.queue.repeat == 1) R.drawable.ic_repeat_one else R.drawable.ic_repeat, when (playback.queue.repeat) { 1 -> "单曲循环"; 2 -> "列表循环"; else -> "顺序播放" }, tint = if (playback.queue.repeat != 0) foreground else foreground.copy(alpha = .45f)) { vm.command("repeat") }
                     }
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 48.dp, vertical = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                         TextButton({ lyrics = !lyrics }) { Text(if (lyrics) "唱片" else "歌词", color = foreground, fontSize = 13.sp) }
                         TextButton({ queue = true }) { AppIcon(R.drawable.ic_queue, "队列", tint = foreground); Spacer(Modifier.width(6.dp)); Text("队列", color = foreground, fontSize = 13.sp) }
+                        TextButton({ addToPlaylist(t) }) { AppIcon(R.drawable.ic_playlist_add, "加入歌单", tint = foreground) }
                         TextButton({ vm.download(listOf(t)) }) { AppIcon(R.drawable.ic_download, "下载", tint = foreground) }
                     }
                 }
@@ -157,18 +167,26 @@ import sh.calvin.reorderable.*
     var value by remember(playback.current?.id) { mutableFloatStateOf(0f) }
     Column(Modifier.padding(horizontal = 28.dp)) {
         Slider(if (seeking) value else (playback.queue.positionMs.toFloat() / duration).coerceIn(0f, 1f), { value = it; seeking = true }, onValueChangeFinished = { vm.command("seek") { putLong("position", (value * duration).toLong()) }; seeking = false }, modifier = Modifier.fillMaxWidth().height(28.dp),
-            thumb = { Box(Modifier.size(10.dp).background(foreground, CircleShape)) },
-            track = { slider -> SliderDefaults.Track(slider, Modifier.height(3.dp), colors = SliderDefaults.colors(activeTrackColor = foreground.copy(alpha = .8f), inactiveTrackColor = foreground.copy(alpha = .15f)), thumbTrackGapSize = 0.dp, drawStopIndicator = null) })
+            thumb = { Box(Modifier.size(16.dp), contentAlignment = Alignment.Center) { Box(Modifier.size(10.dp).background(foreground, CircleShape)) } },
+            track = { slider -> Canvas(Modifier.fillMaxWidth().height(16.dp)) {
+                val y = size.height / 2
+                drawLine(foreground.copy(alpha = .15f), Offset(0f, y), Offset(size.width, y), 3.dp.toPx(), androidx.compose.ui.graphics.StrokeCap.Round)
+                drawLine(foreground.copy(alpha = .8f), Offset(0f, y), Offset(size.width * slider.value.coerceIn(0f, 1f), y), 3.dp.toPx(), androidx.compose.ui.graphics.StrokeCap.Round)
+            } })
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) { Text(timeLabel(if (seeking) (value * duration).toLong() else playback.queue.positionMs), fontSize = 11.sp, color = foreground.copy(alpha = .65f)); Text(timeLabel(duration), fontSize = 11.sp, color = foreground.copy(alpha = .65f)) }
     }
 }
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-@Composable fun LyricsPanel(ui: HomeState, playback: PlaybackState, vm: JiayinViewModel, color: Color, reduced: Boolean, match: () -> Unit, edit: (Int, LyricLine) -> Unit) {
+@Composable fun LyricsPanel(ui: HomeState, playback: PlaybackState, vm: JiayinViewModel, color: Color, reduced: Boolean, match: () -> Unit, edit: (Int, LyricLine) -> Unit, showRecord: () -> Unit = {}) {
     val lyrics = ui.lyrics
     var bilingual by rememberSaveable(playback.current?.id) { mutableStateOf(true) }
     var follow by remember(playback.current?.id) { mutableStateOf(true) }
     val scroll = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    var armed by remember(playback.current?.id) { mutableStateOf(false) }
+    var target by remember(playback.current?.id) { mutableIntStateOf(-1) }
+    var seekConfirmation by remember { mutableIntStateOf(-1) }
+    val toggle by rememberUpdatedState(showRecord)
     val damaged = lyrics?.let { LyricRepairPolicy.damaged(it) } == true || lyrics?.source?.startsWith("NAS 歌词编码异常") == true
     val lines = if (damaged) emptyList() else lyrics?.lines.orEmpty()
     val position = playback.queue.positionMs + (lyrics?.offsetMs ?: 0)
@@ -203,26 +221,64 @@ import sh.calvin.reorderable.*
             if (damaged && vm.repo.settings.getBoolean("auto-repair-lyrics", true)) TextButton({ vm.loadLyrics(true) }, enabled = !ui.lyricsBusy) { Text("重试自动修复", color = color, fontSize = 12.sp) }
             TextButton(match) { Text("手动联网匹配", color = color) }
         } else {
-            LazyColumn(state = scroll, modifier = Modifier.weight(1f).fillMaxWidth().nestedScroll(nested), contentPadding = PaddingValues(horizontal = 32.dp, vertical = 40.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+            LazyColumn(state = scroll, modifier = Modifier.weight(1f).fillMaxWidth().nestedScroll(nested).semantics { contentDescription = "歌词区域：轻点切换唱片，长按三秒后拖动并松手跳转" }.pointerInput(lines, lyrics?.offsetMs) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val start = down.position
+                    var tap = true
+                    val ended = withTimeoutOrNull(3000) {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: return@withTimeoutOrNull true
+                            if (event.changes.size != 1 || change.isConsumed || (change.position - start).getDistance() > viewConfiguration.touchSlop) { tap = false; return@withTimeoutOrNull true }
+                            if (!change.pressed) return@withTimeoutOrNull true
+                        }
+                        @Suppress("UNREACHABLE_CODE") true
+                    }
+                    if (ended != null) { if (tap) toggle() }
+                    else {
+                        armed = true; follow = false
+                        var dragged = false
+                        try {
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (event.changes.size != 1) break
+                                if ((change.position - start).getDistance() > viewConfiguration.touchSlop) dragged = true
+                                val y = change.position.y.toInt()
+                                target = scroll.layoutInfo.visibleItemsInfo.firstOrNull { y >= it.offset && y < it.offset + it.size }?.index ?: -1
+                                event.changes.forEach { it.consume() }
+                                if (!change.pressed) {
+                                    if (dragged) lines.getOrNull(target)?.timeMs?.let { time -> vm.command("seek") { putLong("position", (time - (lyrics?.offsetMs ?: 0)).coerceAtLeast(0)) } }
+                                    follow = true
+                                    break
+                                }
+                                val edge = 48.dp.toPx()
+                                if (y < edge) scope.launch { scroll.scrollBy(-20f) }
+                                else if (y > size.height - edge) scope.launch { scroll.scrollBy(20f) }
+                            }
+                        } finally { armed = false; target = -1 }
+                    }
+                }
+            }, contentPadding = PaddingValues(horizontal = 32.dp, vertical = 40.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
                 itemsIndexed(lines, key = { i, _ -> i }) { i, line ->
                     val alpha by androidx.compose.animation.core.animateFloatAsState(if (i == current) 1f else .76f, tween(if (reduced) 0 else 250), label = "lyric highlight")
-                    Column(Modifier.fillMaxWidth().combinedClickable(onClick = {
-                        line.timeMs?.let { time -> vm.command("seek") { putLong("position", (time - (lyrics?.offsetMs ?: 0)).coerceAtLeast(0)) } }
-                        follow = true
-                    }, onLongClick = { edit(i, line) })) {
+                    Column(Modifier.fillMaxWidth().background(if (armed && target == i) color.copy(alpha = .12f) else Color.Transparent, RoundedCornerShape(8.dp)).semantics { customActions = listOf(CustomAccessibilityAction("跳转到这句歌词") { seekConfirmation = i; true }, CustomAccessibilityAction("校正译文") { edit(i, line); true }) }) {
                         if (line.original.isNotBlank()) Text(line.original, fontSize = if (i == current) 19.sp else 18.sp, lineHeight = 28.sp, color = color.copy(alpha = alpha), fontWeight = if (i == current) FontWeight.SemiBold else FontWeight.Normal)
                         if (bilingual && !line.translation.isNullOrBlank()) Text(line.translation, Modifier.padding(top = 5.dp), fontSize = 15.sp, lineHeight = 23.sp, color = color.copy(alpha = alpha * .9f))
                     }
                 }
             }
-            if (!follow) TextButton({ follow = true; scope.launch { scroll.animateScrollToItem(current, -(scroll.layoutInfo.viewportEndOffset / 3)) } }, Modifier.align(Alignment.CenterHorizontally)) { Text("回到当前", color = color) }
+            if (armed) Text("松手跳转到选中的歌词", Modifier.align(Alignment.CenterHorizontally), color = color, fontSize = 11.sp)
+            if (!follow && !armed) TextButton({ follow = true; scope.launch { scroll.animateScrollToItem(current, -(scroll.layoutInfo.viewportEndOffset / 3)) } }, Modifier.align(Alignment.CenterHorizontally)) { Text("回到当前", color = color) }
             Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                 TextButton({ lyrics?.let { vm.editLyrics(it.copy(offsetMs = it.offsetMs - 500)) } }) { Text("慢 0.5s", color = color, fontSize = 10.sp) }
-                Text(if (lyrics?.machine == true) "机器翻译 · 长按校正" else lyrics?.source.orEmpty(), fontSize = 10.sp, color = color.copy(alpha = .6f))
+                TextButton({ lines.getOrNull(current)?.let { edit(current, it) } }) { Text(if (lyrics?.machine == true) "机器翻译 · 校正" else "校正译文", fontSize = 10.sp, color = color.copy(alpha = .7f)) }
                 TextButton({ lyrics?.let { vm.editLyrics(it.copy(offsetMs = it.offsetMs + 500)) } }) { Text("快 0.5s", color = color, fontSize = 10.sp) }
             }
         }
     }
+    if (seekConfirmation >= 0) AlertDialog(onDismissRequest = { seekConfirmation = -1 }, title = { Text("跳转到这句歌词？") }, text = { Text(lines.getOrNull(seekConfirmation)?.original.orEmpty()) }, confirmButton = { TextButton({ lines.getOrNull(seekConfirmation)?.timeMs?.let { time -> vm.command("seek") { putLong("position", (time - (lyrics?.offsetMs ?: 0)).coerceAtLeast(0)) } }; seekConfirmation = -1; follow = true }) { Text("跳转") } }, dismissButton = { TextButton({ seekConfirmation = -1 }) { Text("取消") } })
 }
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable fun LyricMatchDialog(ui: HomeState, vm: JiayinViewModel, close: () -> Unit) {

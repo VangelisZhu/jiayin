@@ -64,6 +64,7 @@ class JiayinMediaService : MediaLibraryService() {
     private var goingBack = false
     private var transitionReason = Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED
     private var completionKey: String? = null
+    private var favoriteButtonState: Pair<String?, Boolean>? = null
     private val commandNumber = AtomicLong()
     private val noisy = object : BroadcastReceiver() { override fun onReceive(c: Context?, i: Intent?) { pause(PauseCause.HEADSET) } }
     private val network = object : ConnectivityManager.NetworkCallback() {
@@ -182,7 +183,20 @@ class JiayinMediaService : MediaLibraryService() {
     }
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession = session
     private fun absolutePosition() = player.currentPosition.coerceAtLeast(0) + if (state.current?.key == offsetKey) offsetMs else 0
-    private fun publish() { PlaybackHub.mutable.value = PlaybackState(state.copy(positionMs = if (player.mediaItemCount > 0) absolutePosition() else state.positionMs), state.current?.trackId?.let { tracks[it] }, player.isPlaying, player.playbackState == Player.STATE_BUFFERING, cause, error, true, sleepUntil) }
+    private fun publish() { updateFavoriteButton(); PlaybackHub.mutable.value = PlaybackState(state.copy(positionMs = if (player.mediaItemCount > 0) absolutePosition() else state.positionMs), state.current?.trackId?.let { tracks[it] }, player.isPlaying, player.playbackState == Player.STATE_BUFFERING, cause, error, true, sleepUntil) }
+    private fun updateFavoriteButton() {
+        if (!::session.isInitialized) return
+        val t = tracks[state.current?.trackId]
+        val key = t?.id to (t?.starred == true)
+        if (key == favoriteButtonState) return
+        favoriteButtonState = key
+        val button = CommandButton.Builder(if (t?.starred == true) CommandButton.ICON_HEART_FILLED else CommandButton.ICON_HEART_UNFILLED)
+            .setDisplayName(if (t?.starred == true) "取消喜欢" else "喜欢")
+            .setSessionCommand(SessionCommand(PlaybackHub.FAVORITE, Bundle.EMPTY))
+            .setSlots(CommandButton.SLOT_OVERFLOW).setEnabled(t != null).build()
+        session.setMediaButtonPreferences(listOf(button))
+        session.setCustomLayout(listOf(button)) // Compatibility with controllers before Android 13.
+    }
     private fun persist() { val snapshot = state.copy(positionMs = if (player.mediaItemCount > 0) absolutePosition() else state.positionMs); storage.launch { repo.put("queue", "active", snapshot) } }
     private fun flushListening(completed: Boolean = false, skip: Boolean = false) {
         val id = state.current?.trackId ?: return
@@ -343,14 +357,17 @@ class JiayinMediaService : MediaLibraryService() {
         override fun onConnect(session: MediaSession, controller: MediaSession.ControllerInfo): MediaSession.ConnectionResult {
             val commands = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon()
             if (controller.uid == android.os.Process.myUid()) commands.add(SessionCommand(PlaybackHub.COMMAND, Bundle.EMPTY))
+            if (controller.uid == android.os.Process.myUid() || session.isMediaNotificationController(controller) || controller.isTrusted) commands.add(SessionCommand(PlaybackHub.FAVORITE, Bundle.EMPTY))
             return MediaSession.ConnectionResult.AcceptedResultBuilder(session).setAvailableSessionCommands(commands.build()).build()
         }
         override fun onCustomCommand(session: MediaSession, controller: MediaSession.ControllerInfo, command: SessionCommand, args: Bundle): ListenableFuture<SessionResult> {
-            if (command.customAction != PlaybackHub.COMMAND || controller.uid != android.os.Process.myUid()) return Futures.immediateFuture(SessionResult(SessionError.ERROR_PERMISSION_DENIED))
+            val favorite = command.customAction == PlaybackHub.FAVORITE
+            val authorized = if (favorite) controller.uid == android.os.Process.myUid() || session.isMediaNotificationController(controller) || controller.isTrusted else command.customAction == PlaybackHub.COMMAND && controller.uid == android.os.Process.myUid()
+            if (!authorized) return Futures.immediateFuture(SessionResult(SessionError.ERROR_PERMISSION_DENIED))
             val result = SettableFuture.create<SessionResult>()
             scope.launch {
                 try {
-                    commands.withLock { execute(args) }
+                    commands.withLock { if (favorite) toggleFavorite() else execute(args) }
                     result.set(SessionResult(SessionResult.RESULT_SUCCESS))
                 } catch (e: CancellationException) { result.cancel(false); throw e }
                 catch (e: Exception) {
@@ -361,12 +378,22 @@ class JiayinMediaService : MediaLibraryService() {
             return result
         }
     }
+    private suspend fun toggleFavorite() {
+        val id = state.current?.trackId ?: return
+        tracks = withContext(Dispatchers.IO) { repo.library().tracks.associateBy { it.id } }
+        val t = tracks[id] ?: return
+        withContext(Dispatchers.IO) { repo.favorite(t); tracks = repo.library().tracks.associateBy { it.id } }
+        PlaybackHub.libraryRevision.value++
+        publish()
+        scope.launch { repo.syncPending() }
+    }
     private suspend fun execute(args: Bundle) {
         when (args.getString("action")) {
             "start" -> {
                 val staged = withContext(Dispatchers.IO) { val id = args.getString("id")!!; repo.get("command", id, QueueState::class.java).also { repo.dao.delete(repo.account, "command", id) } } ?: error("播放队列读取失败，请重新点歌")
                 install(staged, true)
             }
+            "refresh-favorites" -> { tracks = withContext(Dispatchers.IO) { repo.library().tracks.associateBy { it.id } } }
             "toggle" -> if (player.isPlaying || player.playWhenReady) pause(PauseCause.USER) else play()
             "play" -> play()
             "pause" -> pause(PauseCause.USER)
