@@ -24,21 +24,34 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import java.util.UUID
 
-data class DownloadInfo(val id: String, val progress: Float, val state: Int, val bytes: Long)
+data class DownloadInfo(val id: String, val progress: Float, val state: Int, val bytes: Long, val trackId: String = id)
+data class ServerUiState(val profiles: List<ServerProfile> = emptyList(), val busy: Boolean = false, val blocking: Boolean = false, val status: String = "", val error: String? = null, val offlineTarget: ServerProfile? = null, val footprints: Map<String, AccountFootprint> = emptyMap())
 data class SearchUiState(val active: Boolean = false, val focusKeyboard: Boolean = true, val query: String = "", val scope: SearchScope = SearchScope(), val category: SearchKind = SearchKind.ALL, val hits: List<SearchDocument> = emptyList(), val history: List<SearchHistory> = emptyList(), val busy: Boolean = false)
 data class HomeState(
-    val configured: Boolean = false, val loading: Boolean = true, val status: String = "正在读取曲库",
+    val configured: Boolean = false, val loading: Boolean = true, val preparationError: String? = null, val status: String = "正在读取曲库",
     val library: Library = Library(), val records: Map<String, Listening> = emptyMap(),
     val artists: Map<String, ArtistProfile> = emptyMap(), val topSongs: Map<String, List<String>> = emptyMap(),
     val index: LibraryIndex = LibraryIndex.EMPTY, val regionRules: List<PathRegionRule> = emptyList(),
     val recommendations: List<Recommendation> = emptyList(), val downloads: List<DownloadInfo> = emptyList(),
-    val pending: Int = 0, val connection: String = "尚未测试连接", val message: String? = null, val lyrics: Lyrics? = null,
+    val pending: Int = 0, val uncertain: Int = 0, val connection: String = "尚未测试连接", val message: String? = null, val lyrics: Lyrics? = null,
     val lyricsBusy: Boolean = false, val lyricMatches: List<LyricMatch> = emptyList(),
 )
 @androidx.annotation.OptIn(UnstableApi::class)
 class JiayinViewModel(app: Application) : AndroidViewModel(app) {
-    val repo = JiayinRepository.get(app)
-    private val lyricsRepo = LyricsRepository(repo)
+    var repo = JiayinRepository.get(app).scoped()
+        private set
+    private var lyricsRepo = LyricsRepository(repo)
+    private var sessionJob = SupervisorJob(viewModelScope.coroutineContext[Job])
+    private val sessionMutable = MutableStateFlow(0L)
+    val sessionRevision = sessionMutable.asStateFlow()
+    private val serversMutable = MutableStateFlow(ServerUiState())
+    val servers = serversMutable.asStateFlow()
+    private var switchJob: Job? = null
+    private var switching = false
+    private var frozen = false
+    private val switcher = ServerSwitchCoordinator(repo.profiles,
+        verify = { JiayinRepository.get(app).testProfile(it) },
+        quiesce = { quiesceAccount() }, reload = { reloadAccount() })
     private val mutable = MutableStateFlow(HomeState(configured = repo.configured))
     val state = mutable.asStateFlow()
     private val searchMutable = MutableStateFlow(SearchUiState())
@@ -62,24 +75,39 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
     var selectedCollection: MusicList? = null
     var searchOrigin: SearchReturnLocation? = null
     init {
-        viewModelScope.launch {
-            withContext(Dispatchers.IO) { repo.bindUpstream() }
-            refreshLocal(); if (repo.configured) { connect(); sync() } else mutable.update { it.copy(loading = false) }
-        }
-        viewModelScope.launch { PlaybackHub.libraryRevision.collect { if (it > 0) refreshLocal() } }
+        prepareLocalData()
+        viewModelScope.launch { PlaybackHub.libraryRevision.collect { if (it > 0 && !frozen) refreshLocal() } }
         viewModelScope.launch { PlaybackHub.state.map { it.error }.distinctUntilChanged().collect { error -> error?.let { message(it) } } }
-        viewModelScope.launch { PlaybackHub.state.map { it.current?.id }.distinctUntilChanged().collect { id ->
+        viewModelScope.launch { PlaybackHub.state.map { it.current?.id to repo.session?.generation }.distinctUntilChanged().collect { (id, _) ->
             lyricJob?.cancel()
             mutable.update { it.copy(lyrics = null, lyricMatches = emptyList()) }
-            if (id != null) loadLyrics(false)
+            if (id != null && !frozen) loadLyrics(false)
         } }
     }
+    fun prepareLocalData(clearStreamingCache: Boolean = false) = task {
+        mutable.update { it.copy(loading = true, preparationError = null) }
+        try {
+            withContext(Dispatchers.IO) {
+                repo.bindUpstream()
+                if (clearStreamingCache) {
+                    val cache = DownloadUtil.getStreamingCacheForPreload(getApplication())
+                    cache.keys.toList().forEach { cache.removeResource(it) }
+                }
+                DownloadUtil.getDownloadManager(getApplication())
+            }
+            refreshLocal(); if (repo.configured && !repo.offline) mutable.update { it.copy(loading = true) }
+            refreshServers()
+            if (repo.configured) { connect(); if (!repo.offline) sync() } else mutable.update { it.copy(loading = false) }
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) { mutable.update { it.copy(loading = false, preparationError = "本地下载准备未完成：${e.message ?: "请检查手机剩余空间"}") } }
+    }
     private fun connect() {
-        if (controllerFuture != null) return
+        if (controllerFuture != null || frozen || !repo.configured) return
         val future = runCatching { MediaController.Builder(getApplication(), SessionToken(getApplication(), ComponentName(getApplication(), JiayinMediaService::class.java))).buildAsync() }
             .getOrElse { message("播放服务暂不可用，请重新打开应用"); return }
         controllerFuture = future
-        future.addListener({ runCatching {
+        val expected = repo.session
+        future.addListener({ if (expected != repo.session || frozen || future !== controllerFuture) { MediaController.releaseFuture(future); return@addListener }; runCatching {
             controller = future.get()
             while (pendingCommands.isNotEmpty()) send(pendingCommands.removeFirst())
             command("foreground")
@@ -88,12 +116,13 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun refreshLocal() {
         val expected = ++refreshNumber
         val local = withContext(Dispatchers.IO) { Triple(repo.library(), repo.listening(), repo.dao.list(repo.account, "outbox").size) }
+        val uncertain = withContext(Dispatchers.IO) { repo.dao.list(repo.account, "outbox-create-attempt").count { repo.dao.get(repo.account, "outbox", it.id) != null } }
         val artists = withContext(Dispatchers.IO) { repo.list("artist", ArtistProfile::class.java).associateBy { it.id } }
         val rules = withContext(Dispatchers.IO) { repo.list("folder-region", PathRegionRule::class.java) }
         val index = withContext(Dispatchers.Default) { LibraryIndex.build(local.first, artists, rules, AndroidNameOrdering()) }
         val recommendations = withContext(Dispatchers.Default) { RecommendationEngine.recommend(local.first.tracks, local.second, System.currentTimeMillis() / 86_400_000 + batch) }
         if (expected != refreshNumber) return
-        mutable.update { it.copy(configured = repo.configured, loading = false, library = local.first, records = local.second, artists = artists, recommendations = recommendations, pending = local.third, index = index, regionRules = rules) }
+        mutable.update { it.copy(configured = repo.configured, loading = false, library = local.first, records = local.second, artists = artists, recommendations = recommendations, pending = local.third, uncertain = uncertain, index = index, regionRules = rules) }
         if (search.value.active) updateSearch(search.value.query)
     }
     fun openSearch(scope: SearchScope = SearchScope()) {
@@ -137,10 +166,84 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
     fun setArtistSortName(profile: ArtistProfile, name: String) = task {
         withContext(Dispatchers.IO) { val latest = repo.get("artist", profile.id, ArtistProfile::class.java) ?: profile; repo.put("artist", profile.id, latest.copy(sortName = name.trim().takeIf { it.isNotEmpty() })) }; refreshLocal()
     }
-    fun login(address: String, user: String, password: String) = task {
-        mutable.update { it.copy(loading = true, status = "正在连接 NAS") }
-        try { repo.login(address, user, password); refreshLocal(); connect(); sync() }
-        finally { mutable.update { it.copy(loading = false) } }
+    fun login(address: String, user: String, password: String) = saveServer(address, user, password, "", true)
+    fun saveServer(address: String, user: String, password: String, name: String, activate: Boolean) = serverTask("正在验证服务器") {
+        val profile = JiayinRepository.get(getApplication()).saveProfile(address, user, password, name)
+        if (activate || profile.id == repo.account) switcher.switchTo(profile) else { refreshServers(); message("服务器已保存") }
+    }
+    fun switchServer(profile: ServerProfile, offline: Boolean = false) = serverTask("正在切换到 ${profile.name}") {
+        try { switcher.switchTo(profile, offline); serversMutable.update { it.copy(offlineTarget = null) } }
+        catch (e: AuthenticationRequired) { throw e }
+        catch (e: java.io.IOException) {
+            if (!offline) serversMutable.update { it.copy(offlineTarget = profile) }
+            throw IllegalStateException("无法连接 ${profile.name}，当前账户未改变；可重试或进入离线曲库", e)
+        }
+    }
+    fun dismissOfflineOffer() { serversMutable.update { it.copy(offlineTarget = null) } }
+    fun testServer(profile: ServerProfile) = serverTask("正在测试 ${profile.name}") { message(JiayinRepository.get(getApplication()).testProfile(profile)) }
+    fun renameServer(profile: ServerProfile, name: String) = serverTask("正在保存名称") { repo.profiles.rename(profile.id, name); refreshServers() }
+    fun logoutServer(profile: ServerProfile, remove: Boolean = false) = serverTask(if (remove) "正在移除本地数据" else "正在退出登录") {
+        if (profile.id != repo.account) AccountDownloads.pause(getApplication(), profile.id, null, true)
+        switcher.logout(profile, remove) {
+            AccountDownloads.remove(getApplication(), profile.id)
+            withContext(Dispatchers.IO) {
+                repo.dao.removeAccount(profile.id)
+                val prefs = repo.settings
+                prefs.edit().apply { prefs.all.keys.filter { it.startsWith(profile.id + ".") }.forEach { remove(it) } }.commit()
+                com.eddyizm.tempus.jiayin.ui.Covers.removeAccount(getApplication(), profile.id)
+                val cache = DownloadUtil.getStreamingCacheForPreload(getApplication())
+                cache.keys.filter { it.startsWith(profile.id + "|") }.forEach { cache.removeResource(it) }
+            }
+        }
+        refreshServers()
+    }
+    suspend fun refreshServers() {
+        val values = withContext(Dispatchers.IO) { repo.profiles.all() }
+        val sizes = values.associate { it.id to AccountDownloads.footprint(getApplication(), it.id) }
+        serversMutable.update { it.copy(profiles = values, footprints = sizes) }
+    }
+    private fun serverTask(status: String, block: suspend () -> Unit): Job {
+        if (switchJob?.isActive == true) return switchJob!!
+        switchJob = viewModelScope.launch {
+            switching = true
+            serversMutable.update { it.copy(busy = true, status = status, error = null, offlineTarget = null) }
+            try { block() }
+            catch (e: TimeoutCancellationException) {
+                if (frozen) reloadAccount()
+                serversMutable.update { it.copy(error = "等待后台停止超时，当前账户已保留，请重试") }
+            }
+            catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                if (frozen) reloadAccount() // failed before commit: reopen original account, paused
+                serversMutable.update { it.copy(error = e.message ?: "操作未完成，请重试") }
+            } finally { switching = false; serversMutable.update { it.copy(busy = false, blocking = false) } }
+        }
+        return switchJob!!
+    }
+    private suspend fun quiesceAccount() {
+        frozen = true; refreshNumber++; downloadEpoch++
+        serversMutable.update { it.copy(blocking = true) }
+        SessionGate.block(repo.account)
+        com.eddyizm.tempus.jiayin.ui.Covers.cancelAccount(repo.account)
+        repo.cancelRequests(); sessionJob.cancelAndJoin()
+        searchJob?.cancelAndJoin(); lyricJob?.cancelAndJoin(); downloadJob?.cancelAndJoin(); discoveryJob?.cancelAndJoin()
+        pendingCommands.clear()
+        controller = null; controllerFuture?.let { MediaController.releaseFuture(it) }; controllerFuture = null
+        JiayinMediaService.stopForSwitch(getApplication())
+        AccountDownloads.pauseAndAwait(getApplication(), repo.account)
+        com.eddyizm.tempus.jiayin.ui.Covers.cancelAccount(repo.account)
+    }
+    private suspend fun reloadAccount() {
+        repo = JiayinRepository.get(getApplication()).scoped(); lyricsRepo = LyricsRepository(repo)
+        sessionJob = SupervisorJob(viewModelScope.coroutineContext[Job]); refreshNumber++
+        artistRequests.clear(); selectedCollection = null; searchOrigin = null; batch = 0
+        folderRequest.value = BrowseLocation(); playerRequests.value = 0
+        searchMutable.value = SearchUiState(); mutable.value = HomeState(configured = repo.configured)
+        withContext(Dispatchers.IO) { repo.bindUpstream() }
+        PlaybackHub.reset(); SessionGate.clear(); frozen = false
+        sessionMutable.value++
+        refreshLocal(); if (repo.configured && !repo.offline) mutable.update { it.copy(loading = true) }; refreshServers()
+        if (repo.configured) { connect(); if (!repo.offline) sync() else mutable.update { it.copy(connection = "离线曲库 · 仅使用本地数据与下载") } }
     }
     fun sync() = task {
         mutable.update { it.copy(loading = true, status = "正在同步曲库") }
@@ -150,7 +253,8 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun test() = task { try { val result = repo.testConnection(); mutable.update { it.copy(connection = result) }; message(result) } catch (e: Exception) { mutable.update { it.copy(connection = "连接失败 · 可继续使用下载与本地曲库") }; throw e } }
     fun command(action: String, build: Bundle.() -> Unit = {}) {
-        val args = Bundle().apply { putString("action", action); build() }
+        if (frozen || !repo.configured) return
+        val args = Bundle().apply { putString("action", action); putString("account", repo.account); putLong("generation", repo.session?.generation ?: -1); build() }
         if (controller == null) { if (pendingCommands.size < 64) pendingCommands.addLast(args); connect(); return }
         send(args)
     }
@@ -159,11 +263,12 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
         val command = SessionCommand(PlaybackHub.COMMAND, Bundle.EMPTY)
         if (!active.isSessionCommandAvailable(command)) { message("播放服务尚未准备好，请稍后重试"); return }
         val result = active.sendCustomCommand(command, args)
-        result.addListener({ runCatching {
+        val expected = repo.session
+        result.addListener({ if (repo.session != expected || frozen) return@addListener; runCatching {
             if (result.get().resultCode != androidx.media3.session.SessionResult.RESULT_SUCCESS) message("播放操作未完成，请重试")
         }.onFailure { message("播放服务连接已断开，请重新点播放"); controller = null; controllerFuture = null } }, ContextCompat.getMainExecutor(getApplication()))
     }
-    fun foreground() { if (repo.configured) { connect(); if (controller != null) command("foreground") } }
+    fun foreground() { if (!frozen && repo.configured) { connect(); if (controller != null) command("foreground") } }
     fun start(tracks: List<Track>, shuffle: Boolean = false, source: String = "播放队列", index: Int = 0) = task {
         if (tracks.isEmpty()) { message("这里还没有歌曲"); return@task }
         val recent = state.value.records.values.sortedByDescending { it.lastHeard }.take(100).map { it.id }.toSet()
@@ -244,27 +349,17 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun editLyrics(value: Lyrics) = task { lyricsRepo.save(value); mutable.update { it.copy(lyrics = value) } }
     fun download(tracks: List<Track>, list: MusicList? = null) = task {
-        // An explicit pause/remove invalidates a still-enqueueing batch.
-        val epoch = downloadEpoch
-        // Existing Tempus downloader keeps Room + Media3 download index authoritative.
         require(tracks.isNotEmpty()) { "这里还没有可以下载的歌曲" }
         val manager = DownloadUtil.getDownloadManager(getApplication())
         manager.requirements = Requirements(if (Preferences.isDownloadWifiOnly()) Requirements.NETWORK_UNMETERED else Requirements.NETWORK)
-        DownloadService.sendResumeDownloads(getApplication(), DownloaderService::class.java, true)
+        val epoch = downloadEpoch
         var queued = 0
-        var refused = 0
-        tracks.chunked(30).forEach { batch ->
-            if (epoch != downloadEpoch) return@task
-            val children = batch.map { child(it) }
-            DownloadUtil.downloadMissing(getApplication(), children, list?.id, list?.name) { count ->
-                if (count < 0) { refused++; message("下载未能启动，请在前台重试") } else queued += count
-            }
-            delay(20)
+        for (batch in tracks.chunked(30)) {
+            ensureActive(); if (epoch != downloadEpoch) break
+            queued += AccountDownloads.enqueue(getApplication(), repo, batch); delay(20)
         }
-        if (refused == 0) message(if (queued > 0) "已加入 $queued 首${if (Preferences.isDownloadWifiOnly()) "，仅 Wi-Fi 下载" else "，允许移动网络下载"}" else "已下载或已在队列中")
+        message(if (queued > 0) "已加入 $queued 首${if (Preferences.isDownloadWifiOnly()) "，仅 Wi-Fi 下载" else ""}" else "这些歌曲已下载")
         watchDownloads(true)
-        // Lyrics are optional enrichment. Their requests must not hold up enqueueing or progress.
-        viewModelScope.launch(Dispatchers.IO) { tracks.forEach { if (isActive) runCatching { lyricsRepo.load(it) } } }
     }
     fun watchDownloads(enabled: Boolean) {
         downloadJob?.cancel()
@@ -274,7 +369,7 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
                 val list = withContext(Dispatchers.IO) {
                     val values = mutableListOf<DownloadInfo>()
                     DownloadUtil.getDownloadManager(getApplication()).downloadIndex.getDownloads().use { cursor ->
-                        while (cursor.moveToNext()) { val d = cursor.download; values.add(DownloadInfo(d.request.id, d.percentDownloaded.coerceAtLeast(0f), d.state, d.bytesDownloaded)) }
+                        while (cursor.moveToNext()) { val d = cursor.download; val track = AccountDownloads.trackId(getApplication(), repo.account, d.request.id); if (track != null) values.add(DownloadInfo(d.request.id, d.percentDownloaded.coerceAtLeast(0f), d.state, d.bytesDownloaded, track)) }
                     }
                     values
                 }
@@ -283,30 +378,32 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
     fun pauseDownload(id: String, paused: Boolean) {
-        DownloadService.sendSetStopReason(getApplication(), DownloaderService::class.java, id, if (paused) 1 else Download.STOP_REASON_NONE, false)
+        if (frozen) return
+        AccountDownloads.pause(getApplication(), repo.account, id, paused)
     }
     fun pauseAllDownloads(paused: Boolean) {
-        downloadEpoch++
-        DownloadService.sendSetStopReason(getApplication(), DownloaderService::class.java, null, if (paused) 1 else Download.STOP_REASON_NONE, false)
-        if (paused) DownloadService.sendPauseDownloads(getApplication(), DownloaderService::class.java, false)
-        else DownloadService.sendResumeDownloads(getApplication(), DownloaderService::class.java, true)
-        message(if (paused) "已暂停全部下载" else "已继续全部下载")
+        if (frozen) return
+        downloadEpoch++; AccountDownloads.pause(getApplication(), repo.account, null, paused)
+        message(if (paused) "已暂停当前账户的下载" else "已继续当前账户的下载")
     }
     fun removeDownload(id: String) = removeDownloads(setOf(id))
     fun removeDownloads(ids: Set<String>) = task {
-        downloadEpoch++
-        // Remove by the Media3 request ID, even if the song vanished from the server library.
-        ids.forEach { id -> DownloadService.sendRemoveDownload(getApplication(), DownloaderService::class.java, id, false) }
-        withContext(Dispatchers.IO) { com.eddyizm.tempus.repository.DownloadRepository().delete(ids.toList()) }
+        downloadEpoch++; AccountDownloads.remove(getApplication(), repo.account, ids)
         mutable.update { it.copy(downloads = it.downloads.filterNot { d -> d.id in ids }) }
         message("已移除 ${ids.size} 首手机上的下载")
+    }
+    fun retryUncertainPlaylists() = task {
+        withContext(Dispatchers.IO) { repo.dao.clear(repo.account, "outbox-create-attempt") }
+        repo.syncPending(); refreshLocal()
+        message(if (state.value.pending > 0) "部分修改仍待同步，请检查连接" else "待同步修改已处理")
     }
     fun clearHistory() = task { withContext(Dispatchers.IO) { repo.dao.clear(repo.account, "listening") }; refreshLocal(); message("收听记录与推荐偏好已清空") }
     fun message(text: String) { mutable.update { it.copy(message = text) } }
     fun consumedMessage() { mutable.update { it.copy(message = null) } }
-    private fun task(block: suspend CoroutineScope.() -> Unit): Job = viewModelScope.launch {
+    private fun task(block: suspend CoroutineScope.() -> Unit): Job = viewModelScope.launch(sessionJob) {
+        if (frozen) return@launch
         try { block() } catch (e: CancellationException) { throw e } catch (e: Exception) { message(e.message ?: "操作失败，请重试") }
     }
     private fun child(t: Track) = Child(t.id, title = t.title, artist = t.artist, album = t.album, coverArtId = t.cover.ifBlank { null }, duration = t.duration, albumId = t.albumId, artistId = t.artistId)
-    override fun onCleared() { controllerFuture?.let { MediaController.releaseFuture(it) } }
+    override fun onCleared() { if (frozen) SessionGate.clear(); repo.cancelRequests(); sessionJob.cancel(); controllerFuture?.let { MediaController.releaseFuture(it) } }
 }

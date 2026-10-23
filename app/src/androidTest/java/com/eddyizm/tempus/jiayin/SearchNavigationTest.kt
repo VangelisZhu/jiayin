@@ -23,6 +23,12 @@ import java.io.File
 @androidx.annotation.OptIn(UnstableApi::class)
 @RunWith(AndroidJUnit4::class)
 class SearchNavigationTest {
+    @org.junit.Before fun grantFixtureNotificationPermission() {
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            val ins = InstrumentationRegistry.getInstrumentation()
+            ins.uiAutomation.grantRuntimePermission(ins.targetContext.packageName, android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
     private val ins = InstrumentationRegistry.getInstrumentation()
     private val context get() = ins.targetContext
     private val ui get() = ins.uiAutomation

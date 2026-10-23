@@ -134,6 +134,8 @@ public class App extends Application {
         return preferences;
     }
 
+    public static void clearSubsonicClient() { subsonic = null; }
+
     public static void refreshSubsonicClient() {
         subsonic = getSubsonicClient();
     }

@@ -11,6 +11,7 @@ data class PlaybackState(
     val ready: Boolean = false, val sleepUntil: Long = 0,
 )
 object PlaybackHub {
+    fun reset() { mutable.value = PlaybackState() }
     val libraryRevision = kotlinx.coroutines.flow.MutableStateFlow(0L)
     const val FAVORITE = "jiayin.favorite"
     internal val mutable = MutableStateFlow(PlaybackState())

@@ -14,6 +14,7 @@ class LyricsRepository(private val repo: JiayinRepository, private val online: L
     suspend fun load(track: Track, refresh: Boolean = false): Lyrics? = withContext(Dispatchers.IO) {
         repo.get("lyrics-override", track.id, Lyrics::class.java)?.takeIf { !LyricRepairPolicy.damaged(it) }?.let { return@withContext it }
         val cached = repo.get("lyrics", track.id, Lyrics::class.java)
+        if (repo.offline) return@withContext cached
         if (cached != null && cached.source.startsWith("LRCLIB") && !LyricRepairPolicy.damaged(cached)) {
             repo.put("lyrics-override", track.id, cached)
             return@withContext cached
@@ -61,6 +62,7 @@ class LyricsRepository(private val repo: JiayinRepository, private val online: L
         return value.copy(lines = emptyList(), source = status)
     }
     suspend fun search(track: Track, query: String): List<LyricMatch> = withContext(Dispatchers.IO) {
+        check(!repo.offline && repo.currentSession()) { "请先连接服务器" }
         online.search(query).sortedBy { kotlin.math.abs(it.duration - track.duration) }
     }
     suspend fun select(track: Track, match: LyricMatch): Lyrics = withContext(Dispatchers.IO) {
@@ -79,6 +81,7 @@ class LyricsRepository(private val repo: JiayinRepository, private val online: L
         if (value.lines.any { !it.translation.isNullOrBlank() }) repo.put("translation", "${LyricsEngine.originalHash(value)}:ZH:manual", value)
     }
     suspend fun translate(original: Lyrics): Lyrics = withContext(Dispatchers.IO) {
+        check(!repo.offline && repo.currentSession()) { "请先连接服务器" }
         require(original.lines.isNotEmpty() && !LyricRepairPolicy.damaged(original)) { "请先匹配正确歌词，再翻译" }
         val key = repo.vault.get("${repo.account}.deepl")?.takeIf { it.isNotBlank() } ?: error("请先在设置中填写 DeepL API 密钥")
         val cacheKey = "${LyricsEngine.originalHash(original)}:ZH:deepl"

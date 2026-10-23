@@ -55,10 +55,13 @@ public class AlbumArtContentProvider extends ContentProvider {
     public ParcelFileDescriptor openFile(@NonNull Uri uri, @NonNull String mode) throws FileNotFoundException {
         Context context = getContext();
         String albumId = uri.getLastPathSegment();
+        final boolean accountArtwork = uri.getPathSegments().size() == 3 && "account".equals(uri.getPathSegments().get(0));
         Uri artworkUri = null;
         File localFile = null;
 
-        if (albumId != null && albumId.startsWith("rl_")) {
+        if (accountArtwork) {
+            // The account-qualified loader runs on the provider executor below.
+        } else if (albumId != null && albumId.startsWith("rl_")) {
             // Local radio cover: stored in our app-private files dir, which other processes
             // (SystemUI media controls, Android Auto) cannot open directly. Reading it here in the
             // provider's own process and piping the bytes makes it accessible cross-process.
@@ -73,6 +76,7 @@ public class AlbumArtContentProvider extends ContentProvider {
 
         final File localFileFinal = localFile;
         final Uri artworkUriFinal = artworkUri;
+        final String account = uri.getPathSegments().size() == 3 && "account".equals(uri.getPathSegments().get(0)) ? uri.getPathSegments().get(1) : null;
 
         try {
             // use pipe to communicate between background thread and caller of openFile()
@@ -86,7 +90,9 @@ public class AlbumArtContentProvider extends ContentProvider {
 
                     // local radio cover: read directly from disk; otherwise fetch via Glide
                     File file;
-                    if (localFileFinal != null) {
+                    if (account != null) {
+                        file = com.eddyizm.tempus.jiayin.ui.Covers.accountFile(context, account, albumId);
+                    } else if (localFileFinal != null) {
                         file = localFileFinal;
                     } else {
                         var fileRequest = Glide.with(context)

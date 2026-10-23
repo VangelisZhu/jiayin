@@ -22,6 +22,7 @@ import androidx.media3.session.MediaLibraryService.MediaLibrarySession
 import com.eddyizm.tempus.jiayin.JiayinActivity
 import com.eddyizm.tempus.jiayin.core.*
 import com.eddyizm.tempus.jiayin.data.JiayinRepository
+import com.eddyizm.tempus.jiayin.data.AccountDownloads
 import com.eddyizm.tempus.service.QueuePreloader
 import com.eddyizm.tempus.subsonic.models.Child
 import com.eddyizm.tempus.util.DownloadUtil
@@ -38,6 +39,34 @@ import java.util.concurrent.atomic.AtomicLong
 
 @UnstableApi
 class JiayinMediaService : MediaLibraryService() {
+    private var quiescing = false
+    private val destroyed = CompletableDeferred<Unit>()
+    companion object {
+        @Volatile private var active: JiayinMediaService? = null
+        suspend fun stopForSwitch(context: Context) = withTimeout(15_000) {
+            val old = withContext(Dispatchers.Main.immediate) { active }
+            if (old != null) {
+                withContext(Dispatchers.Main.immediate) {
+                    old.repo.cancelRequests()
+                    old.commands.withLock {
+                        if (old.destroyed.isCompleted || active !== old) return@withLock
+                        old.pause(PauseCause.USER)
+                        old.sleepJob?.cancel(); old.sleepUntil = 0
+                        old.quiescing = true; old.commandNumber.incrementAndGet(); old.generation++
+                        old.retryJob?.cancel(); old.preloader?.cancel(); QueuePreloader.cancel()
+                        old.storage.launch { }.join()
+                        old.player.stop(); old.focus.abandon()
+                    }
+                    context.stopService(Intent(context, JiayinMediaService::class.java))
+                }
+                withTimeout(15_000) { old.destroyed.await() }
+            }
+            PlaybackHub.reset()
+        }
+    }
+    private var preloader: com.eddyizm.tempus.jiayin.playback.AccountPreloader? = null
+    private fun preload() { if (!quiescing && player.isPlaying) preloader?.preload(player) }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val storage = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
     private val commands = Mutex()
@@ -72,7 +101,8 @@ class JiayinMediaService : MediaLibraryService() {
     }
     override fun onCreate() {
         super.onCreate()
-        repo = JiayinRepository.get(this); repo.bindUpstream()
+        repo = JiayinRepository.get(this).scoped(); repo.bindUpstream(); active = this
+        preloader = AccountPreloader(this, repo)
         focus = AudioFocusCoordinator(this) { change ->
             when (change) {
                 AudioManager.AUDIOFOCUS_LOSS, AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> pause(PauseCause.FOCUS, abandon = false)
@@ -81,7 +111,7 @@ class JiayinMediaService : MediaLibraryService() {
             }
         }
         player = ExoPlayer.Builder(this, DownloadUtil.buildRenderersFactory(this, false))
-            .setMediaSourceFactory(DefaultMediaSourceFactory(DownloadUtil.getCacheDataSourceFactory(this))
+            .setMediaSourceFactory(DefaultMediaSourceFactory(AccountDownloads.playbackFactory(this, repo))
                 .setLoadErrorHandlingPolicy(DefaultLoadErrorHandlingPolicy(0))) // retries are bounded here, once
             .setAudioAttributes(AudioAttributes.DEFAULT, false).setHandleAudioBecomingNoisy(false)
             .setWakeMode(C.WAKE_MODE_NETWORK).build()
@@ -120,7 +150,7 @@ class JiayinMediaService : MediaLibraryService() {
         player.addListener(object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) { transitionReason = reason }
             override fun onEvents(p: Player, events: Player.Events) {
-                if (installing) return
+                if (installing || quiescing) return
                 if (events.contains(Player.EVENT_MEDIA_ITEM_TRANSITION)) {
                     val index = p.currentMediaItemIndex.coerceAtLeast(0)
                     val key = state.entries.getOrNull(index)?.key
@@ -181,9 +211,28 @@ class JiayinMediaService : MediaLibraryService() {
             }
         }
     }
-    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession = session
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? = if (quiescing || !repo.currentSession()) null else session
+    private fun foregroundImmediately() {
+        val channel = "jiayin-playback"
+        val manager = getSystemService(android.app.NotificationManager::class.java)
+        if (android.os.Build.VERSION.SDK_INT >= 26) manager.createNotificationChannel(android.app.NotificationChannel(channel, "音乐播放", android.app.NotificationManager.IMPORTANCE_LOW).apply { setSound(null, null) })
+        val notification = androidx.core.app.NotificationCompat.Builder(this, channel)
+            .setSmallIcon(com.eddyizm.tempus.R.drawable.ic_play).setContentTitle(tracks[state.current?.trackId]?.title ?: "家音")
+            .setContentText("正在准备播放").setSilent(true).setOngoing(true).build()
+        androidx.core.app.ServiceCompat.startForeground(this, 1001, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+    }
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // A queued foreground start can arrive during a switch. Meet the Android deadline
+        // synchronously; artwork/network loading must never delay startForeground().
+        foregroundImmediately()
+        if (quiescing || !repo.currentSession()) { stopSelf(startId); return START_NOT_STICKY }
+        return super.onStartCommand(intent, flags, startId)
+    }
+    override fun onUpdateNotification(session: MediaSession, startInForegroundRequired: Boolean) {
+        if (!quiescing && repo.currentSession()) super.onUpdateNotification(session, startInForegroundRequired)
+    }
     private fun absolutePosition() = player.currentPosition.coerceAtLeast(0) + if (state.current?.key == offsetKey) offsetMs else 0
-    private fun publish() { updateFavoriteButton(); PlaybackHub.mutable.value = PlaybackState(state.copy(positionMs = if (player.mediaItemCount > 0) absolutePosition() else state.positionMs), state.current?.trackId?.let { tracks[it] }, player.isPlaying, player.playbackState == Player.STATE_BUFFERING, cause, error, true, sleepUntil) }
+    private fun publish() { if (quiescing || !repo.currentSession()) return; updateFavoriteButton(); PlaybackHub.mutable.value = PlaybackState(state.copy(positionMs = if (player.mediaItemCount > 0) absolutePosition() else state.positionMs), state.current?.trackId?.let { tracks[it] }, player.isPlaying, player.playbackState == Player.STATE_BUFFERING, cause, error, true, sleepUntil) }
     private fun updateFavoriteButton() {
         if (!::session.isInitialized) return
         val t = tracks[state.current?.trackId]
@@ -213,7 +262,7 @@ class JiayinMediaService : MediaLibraryService() {
         val valid = next.entries.filter { it.trackId in map }
         val currentKey = next.current?.key
         val targetIndex = valid.indexOfFirst { it.key == currentKey }.coerceAtLeast(0)
-        val items = withContext(Dispatchers.IO) { valid.map { MappingUtil.mapMediaItem(child(map.getValue(it.trackId))) }.toMutableList() }
+        val items = withContext(Dispatchers.IO) { valid.map { AccountDownloads.mediaItem(this@JiayinMediaService, repo, map.getValue(it.trackId)) }.toMutableList() }
         if (request != commandNumber.get()) return
         flushListening(); installing = true
         tracks = map; state = next.copy(entries = valid, index = targetIndex)
@@ -222,23 +271,23 @@ class JiayinMediaService : MediaLibraryService() {
         lastKey = state.current?.key
         val target = items.getOrNull(targetIndex)
         val targetUri = target?.localConfiguration?.uri
-        if (state.positionMs > 0 && targetUri?.scheme?.startsWith("http") == true && targetUri.getQueryParameter("format")?.let { it != "raw" } == true && !DownloadUtil.getDownloadTracker(this).isDownloaded(state.current?.trackId.orEmpty())) {
+        if (state.positionMs > 0 && targetUri?.scheme == "jiayin-stream" && targetUri.getQueryParameter("format")?.let { it != "raw" } == true && !AccountDownloads.downloaded(this, repo.account, state.current?.trackId.orEmpty())) {
             offsetMs = state.positionMs / 1000 * 1000; offsetKey = state.current?.key
-            items[targetIndex] = target.buildUpon().setUri(MusicUtil.getStreamUri(state.current!!.trackId, (offsetMs / 1000).toInt())).build()
+            items[targetIndex] = AccountDownloads.mediaItem(this@JiayinMediaService, repo, map.getValue(state.current!!.trackId), (offsetMs / 1000).toInt())
         }
         player.playWhenReady = false
         if (items.isEmpty()) player.clearMediaItems() else player.setMediaItems(items, targetIndex, state.positionMs - offsetMs)
         player.repeatMode = state.repeat; player.shuffleModeEnabled = false
-        player.prepare(); installing = false
+        if (start) player.prepare(); installing = false
         if (start) play() else focus.abandon()
-        persist(); publish(); QueuePreloader.preload(this, player)
+        persist(); publish(); preload()
     }
     private fun play() {
-        if (player.mediaItemCount == 0) return
+        if (quiescing || !repo.currentSession() || player.mediaItemCount == 0) return
         retryJob?.cancel(); error = null; retryCount = 0
         // Android 15+ requires a top app or a foreground service to request focus.
         // Reuse Media3's notification rather than creating a second notification.
-        runCatching { onUpdateNotification(session, true) }.onFailure {
+        runCatching { foregroundImmediately() }.onFailure {
             cause = PauseCause.USER; error = "请打开家音后点播放"; publish(); return
         }
         if (!focus.request()) { cause = PauseCause.FOCUS; error = "其他应用正在使用声音，稍后再点播放"; publish(); return }
@@ -246,7 +295,7 @@ class JiayinMediaService : MediaLibraryService() {
             val expected = generation; scope.launch { recover(expected, explicit = true) }; return
         }
         if (player.playbackState == Player.STATE_ENDED) seekAbsolute(0)
-        cause = PauseCause.NONE; player.volume = 1f; player.play(); publish()
+        cause = PauseCause.NONE; player.volume = 1f; player.play(); publish(); preload()
     }
     private fun pause(why: PauseCause, abandon: Boolean = true) {
         // Late focus callbacks must never overwrite a deliberate pause/headset loss.
@@ -256,6 +305,7 @@ class JiayinMediaService : MediaLibraryService() {
         persist(); publish()
     }
     private fun next() {
+        if (quiescing || !repo.currentSession()) return
         if (state.entries.isEmpty()) return
         flushListening(skip = player.isPlaying)
         if (state.index < state.entries.lastIndex) player.seekTo(state.index + 1, 0)
@@ -264,18 +314,20 @@ class JiayinMediaService : MediaLibraryService() {
         play()
     }
     private fun previous() {
+        if (quiescing || !repo.currentSession()) return
         val key = state.history.lastOrNull()
         val index = state.entries.indexOfFirst { it.key == key }
         if (index >= 0) { state = state.copy(history = state.history.dropLast(1)); goingBack = true; player.seekTo(index, 0) } else seekAbsolute(0)
         play()
     }
     private fun seekAbsolute(position: Long) {
+        if (quiescing || !repo.currentSession()) return
         generation++; retryJob?.cancel()
         val target = position.coerceIn(0, ((state.current?.trackId?.let { tracks[it]?.duration } ?: Int.MAX_VALUE).toLong() * 1000 - 1).coerceAtLeast(0))
         val currentOffset = if (offsetKey == state.current?.key) offsetMs else 0
         val uri = player.currentMediaItem?.localConfiguration?.uri
-        val transcoded = uri?.scheme?.startsWith("http") == true && uri.getQueryParameter("format")?.let { it != "raw" } == true
-        if (transcoded && !DownloadUtil.getDownloadTracker(this).isDownloaded(state.current?.trackId.orEmpty())) {
+        val transcoded = uri?.scheme == "jiayin-stream" && uri.getQueryParameter("format")?.let { it != "raw" } == true
+        if (transcoded && !AccountDownloads.downloaded(this, repo.account, state.current?.trackId.orEmpty())) {
             val wasPlaying = player.playWhenReady; scope.launch { restartAt(target, wasPlaying) }
         } else player.seekTo((target - currentOffset).coerceAtLeast(0))
         state = state.copy(positionMs = target); persist(); publish()
@@ -292,12 +344,12 @@ class JiayinMediaService : MediaLibraryService() {
         player.currentMediaItem ?: return
         val track = tracks[state.current?.trackId] ?: return
         val expected = generation
-        val item = withContext(Dispatchers.IO) { MappingUtil.mapMediaItem(child(track)) }
+        val item = withContext(Dispatchers.IO) { AccountDownloads.mediaItem(this@JiayinMediaService, repo, track) }
         if (generation != expected || state.current?.key != key) return
         val uri = item.localConfiguration?.uri ?: return
-        val transcoded = uri.scheme?.startsWith("http") == true && uri.getQueryParameter("format")?.let { it != "raw" } == true && !DownloadUtil.getDownloadTracker(this).isDownloaded(track.id)
+        val transcoded = uri.scheme == "jiayin-stream" && uri.getQueryParameter("format")?.let { it != "raw" } == true && !AccountDownloads.downloaded(this, repo.account, track.id)
         val start = if (transcoded) (position / 1000) * 1000 else 0
-        val adjusted = if (transcoded) item.buildUpon().setUri(MusicUtil.getStreamUri(track.id, (start / 1000).toInt())).build() else item
+        val adjusted = if (transcoded) AccountDownloads.mediaItem(this@JiayinMediaService, repo, track, (start / 1000).toInt()) else item
         offsetMs = start; offsetKey = key
         installing = true
         player.replaceMediaItem(index, adjusted); player.seekTo(index, position - start); player.prepare()
@@ -310,7 +362,7 @@ class JiayinMediaService : MediaLibraryService() {
         val indices = (player.currentMediaItemIndex + 1..(player.currentMediaItemIndex + 2).coerceAtMost(player.mediaItemCount - 1)).toList()
         val upcoming = indices.mapNotNull { i -> state.entries.getOrNull(i)?.let { e -> tracks[e.trackId]?.let { Triple(i, e.key, it) } } }
         scope.launch {
-            val items = withContext(Dispatchers.IO) { upcoming.map { (i, key, t) -> Triple(i, key, MappingUtil.mapMediaItem(child(t))) } }
+            val items = withContext(Dispatchers.IO) { upcoming.map { (i, key, t) -> Triple(i, key, AccountDownloads.mediaItem(this@JiayinMediaService, repo, t)) } }
             if (expected != generation) return@launch
             installing = true
             for ((i, key, item) in items) if (state.entries.getOrNull(i)?.key == key) player.replaceMediaItem(i, item)
@@ -361,6 +413,8 @@ class JiayinMediaService : MediaLibraryService() {
             return MediaSession.ConnectionResult.AcceptedResultBuilder(session).setAvailableSessionCommands(commands.build()).build()
         }
         override fun onCustomCommand(session: MediaSession, controller: MediaSession.ControllerInfo, command: SessionCommand, args: Bundle): ListenableFuture<SessionResult> {
+            if (quiescing || !repo.currentSession() || (command.customAction == PlaybackHub.COMMAND && args.getString("account", repo.account) != repo.account)) return Futures.immediateFuture(SessionResult(SessionError.ERROR_INVALID_STATE))
+            if (args.containsKey("generation") && args.getLong("generation") != repo.session?.generation) return Futures.immediateFuture(SessionResult(SessionError.ERROR_INVALID_STATE))
             val favorite = command.customAction == PlaybackHub.FAVORITE
             val authorized = if (favorite) controller.uid == android.os.Process.myUid() || session.isMediaNotificationController(controller) || controller.isTrusted else command.customAction == PlaybackHub.COMMAND && controller.uid == android.os.Process.myUid()
             if (!authorized) return Futures.immediateFuture(SessionResult(SessionError.ERROR_PERMISSION_DENIED))
@@ -430,13 +484,14 @@ class JiayinMediaService : MediaLibraryService() {
     }
     override fun onTaskRemoved(rootIntent: Intent?) { persist(); if (!player.playWhenReady) stopSelf() }
     override fun onDestroy() {
-        persist(); flushListening(); QueuePreloader.cancel(); focus.abandon()
+        if (!quiescing) { persist(); flushListening() }; preloader?.cancel(); QueuePreloader.cancel(); focus.abandon()
         unregisterReceiver(noisy); getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(network)
         session.release(); player.release()
         // Let final ordered IO snapshots complete; cancel UI/retry jobs separately.
         scope.cancel()
         storage.launch { storage.cancel() }
-        PlaybackHub.mutable.value = PlaybackHub.mutable.value.copy(playing = false, ready = false)
+        if (active === this) { active = null; PlaybackHub.reset() }
+        destroyed.complete(Unit)
         super.onDestroy()
     }
 }

@@ -32,6 +32,12 @@ import java.util.concurrent.TimeUnit
 @androidx.annotation.OptIn(UnstableApi::class)
 @RunWith(AndroidJUnit4::class)
 class PlayerInteractionTest {
+    @org.junit.Before fun grantFixtureNotificationPermission() {
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            val ins = InstrumentationRegistry.getInstrumentation()
+            ins.uiAutomation.grantRuntimePermission(ins.targetContext.packageName, android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val context get() = instrumentation.targetContext
     @Test(timeout = 150000) fun overlayLyricsFavouritePlaylistAndDownloadBatchRegression() = runBlocking {
@@ -66,7 +72,7 @@ class PlayerInteractionTest {
                 repeat(12) { click(song.title) }
                 assertEquals("Title touches changed the queue", queue.current?.key, PlaybackHub.state.value.queue.current?.key)
                 assertEquals("Title touches caused downloads", 0, server.downloads.get())
-                assertEquals("Title touches enqueued downloads", 0, DownloadUtil.getDownloadManager(context).currentDownloads.count { it.request.id in server.tracks.map { t -> t.id } })
+                assertEquals("Title touches enqueued downloads", 0, DownloadUtil.getDownloadManager(context).currentDownloads.count { com.eddyizm.tempus.jiayin.data.AccountDownloads.trackId(context, repo.account, it.request.id) in server.tracks.map { t -> t.id } })
                 click("加入歌单"); node("测试歌单")
                 click("测试歌单")
                 await("playlist persisted") { repo.library().playlists.any { song.id in it.tracks } }
@@ -93,14 +99,14 @@ class PlayerInteractionTest {
                 assertEquals(queue.current?.key, PlaybackHub.state.value.queue.current?.key)
                 instrumentation.runOnMainSync { vm.download(server.tracks.take(3)); vm.watchDownloads(true) }
                 instrumentation.runOnMainSync { DownloadUtil.getDownloadManager(context).requirements = Requirements(0) }
-                await("three completed downloads", 20000) { server.tracks.take(3).all { DownloadUtil.getDownloadManager(context).downloadIndex.getDownload(it.id)?.state == Download.STATE_COMPLETED } }
+                await("three completed downloads", 20000) { server.tracks.take(3).all { DownloadUtil.getDownloadManager(context).downloadIndex.getDownload(com.eddyizm.tempus.jiayin.data.AccountDownloads.requestFor(context, repo.account, it.id)!!.requestId)?.state == Download.STATE_COMPLETED } }
                 instrumentation.runOnMainSync { vm.pauseAllDownloads(true) }
                 await("all downloads paused") { DownloadUtil.getDownloadManager(context).downloadsPaused }
                 instrumentation.runOnMainSync { vm.pauseAllDownloads(false) }
                 await("all downloads resumed") { !DownloadUtil.getDownloadManager(context).downloadsPaused }
                 // A disappeared library song must still be deletable by request ID.
                 repo.saveLibrary(repo.library().copy(tracks = repo.library().tracks.drop(1))); vm.refreshLocal()
-                val removed = server.tracks.take(3).map { it.id }.toSet()
+                val removed = server.tracks.take(3).map { com.eddyizm.tempus.jiayin.data.AccountDownloads.requestFor(context, repo.account, it.id)!!.requestId }.toSet()
                 instrumentation.runOnMainSync { vm.removeDownloads(removed) }
                 await("batch removed from Media3 and Room", 15000) { removed.all { DownloadUtil.getDownloadManager(context).downloadIndex.getDownload(it) == null && com.eddyizm.tempus.repository.DownloadRepository().getDownload(it) == null } }
             } finally {

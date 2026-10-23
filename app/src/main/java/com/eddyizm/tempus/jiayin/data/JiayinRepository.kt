@@ -20,7 +20,19 @@ import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
-class JiayinRepository(val context: Context) {
+class JiayinRepository(val context: Context, private val fixedSession: AccountSession? = null, private val fixed: Boolean = false) {
+    val profiles = ServerProfiles(context)
+    fun scoped(): JiayinRepository = synchronized(sessionLock) {
+        val snapshot = profiles.active()
+        val cached = sessionRepository
+        if (cached != null && cached.fixedSession?.profile?.id == snapshot?.profile?.id &&
+            cached.fixedSession?.generation == snapshot?.generation && cached.fixedSession?.offline == snapshot?.offline) cached
+        else JiayinRepository(context.applicationContext, snapshot, true).also { sessionRepository = it }
+    }
+    val session get() = if (fixed) fixedSession else profiles.active()
+    val offline get() = session?.offline == true
+    fun currentSession() = SessionGate.permits(account) && session?.let { profiles.active()?.let { now -> now.profile.id == it.profile.id && now.generation == it.generation } } == true
+    fun cancelRequests() { http.dispatcher.cancelAll() }
     val settings = context.getSharedPreferences("jiayin", Context.MODE_PRIVATE)
     val vault = SecureVault(context)
     val gson = Gson()
@@ -28,18 +40,19 @@ class JiayinRepository(val context: Context) {
     val http = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS)
         .callTimeout(45, TimeUnit.SECONDS).followRedirects(false).followSslRedirects(false).build()
     private val syncMutex = Mutex()
-    val configured get() = settings.getString("account", null) != null
-    val account get() = settings.getString("account", "unconfigured")!!
-    val server get() = settings.getString("server", "").orEmpty()
-    val user get() = settings.getString("user", "").orEmpty()
-    fun <T> get(kind: String, id: String, type: Class<T>): T? = dao.get(account, kind, id)?.let { runCatching { gson.fromJson(it.payload, type) }.getOrNull() }
-    fun put(kind: String, id: String, value: Any) = dao.put(LocalRow().apply { account = this@JiayinRepository.account; this.kind = kind; this.id = id; payload = gson.toJson(value); updated = System.currentTimeMillis() })
-    fun <T> list(kind: String, type: Class<T>): List<T> = dao.list(account, kind).mapNotNull { runCatching { gson.fromJson(it.payload, type) }.getOrNull() }
+    val configured get() = if (fixed) fixedSession != null else profiles.active() != null
+    val account get() = if (fixed) fixedSession?.profile?.id ?: "unconfigured" else settings.getString("account", "unconfigured")!!
+    val server get() = if (fixed) fixedSession?.profile?.address.orEmpty() else settings.getString("server", "").orEmpty()
+    val user get() = if (fixed) fixedSession?.profile?.username.orEmpty() else settings.getString("user", "").orEmpty()
+    private val storage get() = AccountStorage(dao, account, gson)
+    fun <T> get(kind: String, id: String, type: Class<T>): T? = storage.get(kind, id, type)
+    fun put(kind: String, id: String, value: Any) = storage.put(kind, id, value)
+    fun <T> list(kind: String, type: Class<T>): List<T> = storage.list(kind, type)
     fun library(): Library = get("library", "snapshot", Library::class.java) ?: Library()
     fun listening() = list("listening", Listening::class.java).associateBy { it.id }
-    fun saveLibrary(value: Library) = put("library", "snapshot", value)
+    fun saveLibrary(value: Library) { put("library", "snapshot", value); put("sync-meta", "last", value.syncedAt) }
 
-    suspend fun login(address: String, username: String, password: String) = withContext(Dispatchers.IO) {
+    suspend fun saveProfile(address: String, username: String, password: String, name: String = ""): ServerProfile = withContext(Dispatchers.IO) {
         val url = address.trim().trimEnd('/').toHttpUrl()
         require(url.scheme == "https" || ServerAddressPolicy.allowsCleartext(url.host)) { "公网连接请使用 HTTPS；HTTP 仅支持本地网络地址" }
         require(url.username.isEmpty() && url.password.isEmpty() && url.query == null && url.fragment == null) { "地址里不要填写账号、查询参数或密码" }
@@ -47,14 +60,28 @@ class JiayinRepository(val context: Context) {
         val addressClean = url.toString().trimEnd('/')
         val salt = UUID.randomUUID().toString().replace("-", "")
         val token = MessageDigest.getInstance("MD5").digest((password + salt).toByteArray()).joinToString("") { "%02x".format(it) }
-        val scope = digest("$addressClean\n$username")
+        val scope = ServerProfiles.id(addressClean, username)
         requestAt(addressClean, username, token, salt, "ping")
-        vault.put("$scope.token", token); vault.put("$scope.salt", salt)
-        settings.edit(commit = true) { putString("account", scope); putString("server", addressClean); putString("user", username) }
-        bindUpstream()
+        vault.putAll(mapOf("$scope.token" to token, "$scope.salt" to salt))
+        CredentialBridge.invalidate()
+        ServerProfile(scope, name.trim().ifBlank { profiles.find(scope)?.name ?: url.host }, addressClean, username).also { profiles.upsert(it) }
+    }
+    suspend fun login(address: String, username: String, password: String) {
+        check(!fixed) { "请通过服务器管理切换账户" }
+        profiles.activate(saveProfile(address, username, password)); bindUpstream()
+    }
+    suspend fun testProfile(profile: ServerProfile): String = withContext(Dispatchers.IO) {
+        val auth = vault.authentication(profile.id) ?: throw AuthenticationRequired()
+        val result = requestAt(profile.address, profile.username, auth.first, auth.second, "ping")
+        "已连接 · ${result.str("type").ifBlank { "OpenSubsonic" }} ${result.str("serverVersion")}"
     }
     fun bindUpstream() {
-        if (!configured) return
+        if (!configured) {
+            Preferences.setServer(""); Preferences.setInUseServerAddress(""); Preferences.setServerId(""); Preferences.setUser("")
+            // Clear upstream storage without writing through the active account bridge.
+            Preferences.setPassword(null); Preferences.setToken(null); Preferences.setSalt(null)
+            CredentialBridge.invalidate(); App.clearSubsonicClient(); return
+        }
         Preferences.setServer(server); Preferences.setInUseServerAddress(server); Preferences.setServerId(account); Preferences.setUser(user)
         // Upstream Subsonic, artwork and download components share token auth. Password is not stored.
         Preferences.setPassword(null); Preferences.setToken(vault.get("$account.token")); Preferences.setSalt(vault.get("$account.salt"))
@@ -69,22 +96,37 @@ class JiayinRepository(val context: Context) {
         }
         App.refreshSubsonicClient()
     }
-    fun request(method: String, params: Map<String, List<String>> = emptyMap()): JsonObject =
-        requestAt(server, user, vault.get("$account.token") ?: error("请重新登录"), vault.get("$account.salt") ?: error("请重新登录"), method, params)
+    fun request(method: String, params: Map<String, List<String>> = emptyMap()): JsonObject {
+        check(!fixed || currentSession()) { "账户已切换，请重试" }
+        check(!offline) { "当前为离线曲库，请连接服务器后重试" }
+        val auth = vault.authentication(account) ?: throw AuthenticationRequired()
+        val result = requestAt(server, user, auth.first, auth.second, method, params)
+        check(!fixed || currentSession()) { "账户已切换，请重试" }
+        return result
+    }
+    fun authenticatedUrl(method: String, id: String, extra: Map<String, String> = emptyMap()): String {
+        check(currentSession() && !offline) { "当前账户不可联网" }
+        val auth = vault.authentication(account) ?: throw AuthenticationRequired()
+        return "$server/rest/$method.view".toHttpUrl().newBuilder()
+            .addQueryParameter("u", user).addQueryParameter("t", auth.first)
+            .addQueryParameter("s", auth.second).addQueryParameter("v", "1.16.1")
+            .addQueryParameter("c", "Jiayin").addQueryParameter("id", id).apply { extra.forEach { (k, v) -> addQueryParameter(k, v) } }.build().toString()
+    }
 
     private fun requestAt(address: String, user: String, token: String, salt: String, method: String, params: Map<String, List<String>> = emptyMap()): JsonObject {
         val form = FormBody.Builder().add("u", user).add("t", token).add("s", salt).add("v", "1.16.1").add("c", "Jiayin").add("f", "json")
         params.forEach { (key, values) -> values.forEach { form.add(key, it) } }
         return http.newCall(Request.Builder().url("$address/rest/$method.view").post(form.build()).build()).execute().use { response ->
+            if (response.code >= 500) throw java.io.IOException("服务器暂时不可用（HTTP ${response.code}）")
+            if (response.code == 401 || response.code == 403) throw AuthenticationRequired()
             check(response.isSuccessful) { "服务器返回 HTTP ${response.code}" }
             val root = JsonParser.parseString(response.body?.string() ?: error("服务器返回空内容")).asJsonObject.getAsJsonObject("subsonic-response") ?: error("不是有效的 Subsonic 服务")
+            if (root.getAsJsonObject("error")?.num("code") in listOf(40, 41, 42, 43, 44)) throw AuthenticationRequired()
             check(root.str("status") == "ok") { root.getAsJsonObject("error")?.str("message") ?: "接口请求失败" }
             root
         }
     }
-    suspend fun testConnection(): String = withContext(Dispatchers.IO) {
-        val result = request("ping"); "已连接 · ${result.str("type").ifBlank { "OpenSubsonic" }} ${result.str("serverVersion")}"
-    }
+    suspend fun testConnection(): String = testProfile(session?.profile ?: throw AuthenticationRequired())
     suspend fun synchronize(progress: (String) -> Unit = {}): Library = syncMutex.withLock { withContext(Dispatchers.IO) {
         flushOutbox()
         val songs = linkedMapOf<String, Track>()
@@ -155,6 +197,17 @@ class JiayinRepository(val context: Context) {
                 when (op.method) {
                     "replacePlaylist" -> {
                         if (resolved?.startsWith("local:") == true) {
+                            val attempted = get("outbox-create-attempt", op.id, Boolean::class.java) == true
+                            if (attempted) {
+                                val matches = request("getPlaylists").getAsJsonObject("playlists")?.objects("playlist").orEmpty().filter { it.str("name") == op.params["name"]?.firstOrNull() }
+                                    .filter { p -> request("getPlaylist", one("id", p.str("id"))).getAsJsonObject("playlist")?.objects("entry").orEmpty().map { it.str("id") } == op.params["songId"].orEmpty() }
+                                if (matches.size != 1) break // Require explicit user resolution; no duplicate playlist.
+                                val remote = matches.single().str("id")
+                                put("playlist-id", resolved, remote)
+                                saveLibrary(library().let { l -> l.copy(playlists = l.playlists.map { if (it.id == resolved) it.copy(id = remote, pending = false) else it }) })
+                                dao.delete(account, "outbox", op.id); dao.delete(account, "outbox-create-attempt", op.id); continue
+                            }
+                            put("outbox-create-attempt", op.id, true)
                             val result = request("createPlaylist", op.params)
                             val remote = result.getAsJsonObject("playlist")?.str("id")?.takeIf { it.isNotBlank() } ?: error("服务器未返回新歌单 ID")
                             put("playlist-id", resolved, remote)
@@ -170,6 +223,7 @@ class JiayinRepository(val context: Context) {
                     else -> request(op.method, op.params)
                 }
                 dao.delete(account, "outbox", op.id)
+                dao.delete(account, "outbox-create-attempt", op.id)
             } catch (_: Exception) { break } // preserve ordered outbox; UI explicitly shows pending status
         }
     }
@@ -180,6 +234,8 @@ class JiayinRepository(val context: Context) {
     }
     @Synchronized fun dislike(id: String) { put("listening", id, (get("listening", id, Listening::class.java) ?: Listening(id)).copy(disliked = true)) }
     companion object {
+        private val sessionLock = Any()
+        private var sessionRepository: JiayinRepository? = null
         @Volatile private var instance: JiayinRepository? = null
         fun get(context: Context): JiayinRepository = instance ?: synchronized(this) { instance ?: JiayinRepository(context.applicationContext).also { instance = it } }
         fun one(key: String, value: String) = mapOf(key to listOf(value))

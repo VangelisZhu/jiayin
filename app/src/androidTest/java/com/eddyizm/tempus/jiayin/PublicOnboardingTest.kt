@@ -19,8 +19,9 @@ class PublicOnboardingTest {
     @Test(timeout = 30000) fun freshConfigurationIsBlankAndOnlineRepairRequiresOptIn() = runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
+        if (android.os.Build.VERSION.SDK_INT >= 33) instrumentation.uiAutomation.grantRuntimePermission(context.packageName, android.Manifest.permission.POST_NOTIFICATIONS)
         val repo = JiayinRepository.get(context)
-        val keys = listOf("account", "server", "user", "auto-repair-lyrics")
+        val keys = listOf("account", "server", "user", "auto-repair-lyrics", "server-profiles-v1")
         val saved = repo.settings.all.filterKeys { it in keys }
         repo.settings.edit().apply { keys.forEach { remove(it) } }.commit()
         try {
@@ -41,7 +42,7 @@ class PublicOnboardingTest {
                     for (i in 0 until node.childCount) node.getChild(i)?.let { pending.add(it) }
                 }
                 val fields = nodes.filter { it.className?.toString() == "android.widget.EditText" }
-                assertEquals(3, fields.size)
+                assertEquals("Visible onboarding nodes: " + nodes.mapNotNull { it.text?.toString() }.joinToString(" | "), 3, fields.size)
                 assertTrue(fields.all { it.text.isNullOrBlank() })
                 val checkboxes = nodes.filter { it.isCheckable }
                 assertEquals(1, checkboxes.size); assertFalse(checkboxes.single().isChecked)

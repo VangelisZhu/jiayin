@@ -15,6 +15,8 @@
 3. 连接成功后同步曲库。家音不会内置、猜测或访问某个人的服务器。
 4. “随便听听”按偏好探索未收藏、未加入歌单的曲目，并减少歌手重复；歌单可以独立随机。歌曲菜单可下载，默认仅 Wi-Fi。
 
+服务器管理位于 **设置 → 音乐服务器 · 切换与退出**，也可点击“我的”页面顶部的服务器名称进入。切换后音乐和下载保持暂停；退出删除登录凭据并保留本地数据，重新登录恢复；移除账户才清理该账户的手机数据。
+
 公网域名不能自行穿透运营商网络；远程听歌需要你已有可达的入口。应用不会建立 VPN，也不提供中转服务。
 
 ## 界面
@@ -25,7 +27,11 @@
 
 <img src="docs/screenshots/search-browser.png" width="240" alt="搜索浏览与放大镜"/> <img src="docs/screenshots/artist-index.png" width="240" alt="歌手字母索引"/> <img src="docs/screenshots/folder-hierarchy.png" width="240" alt="文件夹层级浏览"/>
 
+<img src="docs/screenshots/server-management.png" width="240" alt="多服务器管理（生成测试数据）"/> <img src="docs/screenshots/server-add.png" width="240" alt="添加服务器"/>
+
 ## 功能
+
+- 多服务器／多账户管理：仅保存、一键切换、退出与移除；各账户分别保留曲库、下载及播放进度。
 
 - 旋转黑胶、封面取色、柔和渐变、悬浮迷你播放器、锁屏与通知控制。
 - 随机/循环、队列管理、收藏与歌单；推荐只使用现有曲库与本机收听反馈。

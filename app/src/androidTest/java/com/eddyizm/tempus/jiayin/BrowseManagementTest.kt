@@ -25,6 +25,12 @@ import java.io.File
 @androidx.annotation.OptIn(UnstableApi::class)
 @RunWith(AndroidJUnit4::class)
 class BrowseManagementTest {
+    @org.junit.Before fun grantFixtureNotificationPermission() {
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            val ins = InstrumentationRegistry.getInstrumentation()
+            ins.uiAutomation.grantRuntimePermission(ins.targetContext.packageName, android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val context get() = instrumentation.targetContext
     @Test(timeout = 90000) fun artistTabsSearchClassificationFavoritesAndBulkDownloadControls() = runBlocking {
@@ -61,18 +67,16 @@ class BrowseManagementTest {
                 click("全部地区 ▾"); click("日本"); click("全部类型 ▾"); click("乐队/组合"); node(song.artist); shot("12-artist-categories")
                 click("曲风"); node("来自你的曲库"); click("风格 1"); node("随机播放"); shot("13-genres")
                 click("我的"); click("下载与离线")
-                // Seed genuine paused Media3 requests. No reflective UI-state injection.
-                instrumentation.runOnMainSync {
-                    server.tracks.take(3).forEach { t ->
-                        val request = androidx.media3.exoplayer.offline.DownloadRequest.Builder(t.id, android.net.Uri.parse("http://localhost:${server.port}/rest/download.view")).build()
-                        androidx.media3.exoplayer.offline.DownloadService.sendAddDownload(context, com.eddyizm.tempus.service.DownloaderService::class.java, request, 1, false)
-                    }
-                }
-                await("paused download rows") { vm.state.value.downloads.count { it.id in server.tracks.map { t -> t.id } } == 3 }
+                // Enqueue genuine account-owned Media3 requests, then pause the account.
+                var batch: Job? = null
+                instrumentation.runOnMainSync { batch = vm.download(server.tracks.take(3)) }
+                batch!!.join()
+                instrumentation.runOnMainSync { vm.pauseAllDownloads(true) }
+                await("paused download rows") { vm.state.value.downloads.count { it.trackId in server.tracks.map { t -> t.id } } == 3 }
                 val count = vm.state.value.downloads.size
                 click("批量管理"); click("全选"); node("删除所选 $count"); shot("14-downloads-batch")
                 click("删除全部"); node("移除 $count 首下载？"); click("取消")
-                instrumentation.runOnMainSync { vm.removeDownloads(server.tracks.take(3).map { it.id }.toSet()) }
+                instrumentation.runOnMainSync { vm.removeDownloads(server.tracks.take(3).map { com.eddyizm.tempus.jiayin.data.AccountDownloads.requestFor(context, repo.account, it.id)!!.requestId }.toSet()) }
                 server.rejectMetadata = true
                 val fallback = artistCollection(song, vm.state.value.library.tracks)
                 assertTrue(repo.topSongs(song.artist, fallback.tracks.toSet()).isEmpty())

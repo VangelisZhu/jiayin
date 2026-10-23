@@ -43,6 +43,12 @@ import kotlin.math.sin
 @androidx.annotation.OptIn(UnstableApi::class)
 @RunWith(AndroidJUnit4::class)
 class MediaPipelineTest {
+    @org.junit.Before fun grantFixtureNotificationPermission() {
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            val ins = InstrumentationRegistry.getInstrumentation()
+            ins.uiAutomation.grantRuntimePermission(ins.targetContext.packageName, android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val context get() = instrumentation.targetContext
 
@@ -81,11 +87,11 @@ class MediaPipelineTest {
                 val downloadMessage = model!!.state.value.message
                 try {
                     await("download bytes persisted ($downloadMessage)", 12000) {
-                        DownloadUtil.getDownloadManager(context).downloadIndex.getDownload(tracks[0].id)?.let { it.state == Download.STATE_COMPLETED && it.bytesDownloaded > 0 } == true
+                        DownloadUtil.getDownloadManager(context).downloadIndex.getDownload(com.eddyizm.tempus.jiayin.data.AccountDownloads.requestFor(context, repo.account, tracks[0].id)!!.requestId)?.let { it.state == Download.STATE_COMPLETED && it.bytesDownloaded > 0 } == true
                     }
                 } catch (e: Exception) {
                     val manager = DownloadUtil.getDownloadManager(context)
-                    val download = manager.downloadIndex.getDownload(tracks[0].id)
+                    val download = manager.downloadIndex.getDownload(com.eddyizm.tempus.jiayin.data.AccountDownloads.requestFor(context, repo.account, tracks[0].id)!!.requestId)
                     error("${e.message}; paused=${manager.downloadsPaused}; requirements=${manager.notMetRequirements}; state=${download?.state}; failure=${download?.failureReason}; requests=${server.downloads.get()}")
                 }
                 assertTrue("No download endpoint reached", server.downloads.get() > 0)
@@ -145,10 +151,13 @@ class MediaPipelineTest {
         }
     }
 
-    internal class MediaServer(count: Int = 2, catalog: Boolean = false, supplied: List<Track>? = null) : AutoCloseable {
+    internal class MediaServer(count: Int = 2, catalog: Boolean = false, supplied: List<Track>? = null, val username: String = "fixture", frequency: Int = 440, coverColor: Int = 0xff3b7777.toInt(), allowedUsers: Set<String> = setOf(username)) : AutoCloseable {
         private val socket = ServerSocket(0)
         val port get() = socket.localPort
         var online = true
+        var searchDelay = 0L
+        var downloadChunkDelay = 0L
+        val requests = AtomicInteger()
         val streams = AtomicInteger(); val images = AtomicInteger(); val downloads = AtomicInteger()
         private val scope = UUID.randomUUID().toString()
         val tracks = supplied ?: (1..count).map { Track("pipeline-$scope-$it", "播放测试 $it", if (catalog) "示例歌手 ${it % 3}" else "家音测试", album = if (catalog) "专辑 ${it % 2}" else "", albumId = if (catalog) "album-${it % 2}" else "", artistId = if (catalog) "artist-${it % 3}" else "", duration = 30, genre = if (catalog) "风格 ${it % 2}" else "", releaseDate = if (catalog) 20200101L + it * 10000 else 0) }
@@ -157,10 +166,10 @@ class MediaPipelineTest {
         private val audio: ByteArray = ByteBuffer.allocate(44 + 16000 * 2 * 30).order(ByteOrder.LITTLE_ENDIAN).apply {
             put("RIFF".toByteArray()); putInt(capacity() - 8); put("WAVEfmt ".toByteArray()); putInt(16); putShort(1); putShort(1)
             putInt(16000); putInt(32000); putShort(2); putShort(16); put("data".toByteArray()); putInt(capacity() - 44)
-            repeat(16000 * 30) { putShort((sin(2 * Math.PI * 440 * it / 16000) * 2000).toInt().toShort()) }
+            repeat(16000 * 30) { putShort((sin(2 * Math.PI * frequency * it / 16000) * 2000).toInt().toShort()) }
         }.array()
         private val png = ByteArrayOutputStream().use { output ->
-            Bitmap.createBitmap(96, 96, Bitmap.Config.ARGB_8888).apply { eraseColor(0xff3b7777.toInt()); compress(Bitmap.CompressFormat.PNG, 100, output); recycle() }
+            Bitmap.createBitmap(96, 96, Bitmap.Config.ARGB_8888).apply { eraseColor(coverColor); compress(Bitmap.CompressFormat.PNG, 100, output); recycle() }
             output.toByteArray()
         }
         private val worker = thread(isDaemon = true, name = "media-pipeline-fixture") {
@@ -174,7 +183,13 @@ class MediaPipelineTest {
                     val body = CharArray(length); var offset = 0
                     while (offset < length) { val n = reader.read(body, offset, length - offset); if (n < 0) break; offset += n }
                     val auth = request + String(body)
-                    val authenticated = auth.contains("t=") && auth.contains("s=") && auth.contains("u=fixture")
+                    requests.incrementAndGet()
+                    val parameters = (request.substringAfter("?", "").substringBefore(" HTTP/") + "&" + String(body)).split("&").filter { it.contains("=") }.associate {
+                        java.net.URLDecoder.decode(it.substringBefore("="), "UTF-8") to java.net.URLDecoder.decode(it.substringAfter("="), "UTF-8")
+                    }
+                    val expected = java.security.MessageDigest.getInstance("MD5").digest(("fixture-password" + parameters["s"]).toByteArray()).joinToString("") { "%02x".format(it) }
+                    val authenticated = parameters["u"] in allowedUsers && parameters["t"] == expected
+                    if (request.contains("/search3") && searchDelay > 0) Thread.sleep(searchDelay)
                     var type = "application/json"
                     val result: ByteArray = if (!online || !authenticated) "unavailable".toByteArray() else when {
                         request.contains("/getCoverArt") -> { images.incrementAndGet(); type = "image/png"; png }
@@ -192,9 +207,12 @@ class MediaPipelineTest {
                         })).toByteArray()
                     }
                     val start = range.coerceIn(0, result.size)
-                    val status = if (!online || !authenticated) "503 Unavailable" else if (start > 0) "206 Partial Content" else "200 OK"
+                    val status = if (!online) "503 Unavailable" else if (!authenticated) "401 Unauthorized" else if (start > 0) "206 Partial Content" else "200 OK"
                     val contentRange = if (start > 0) "Content-Range: bytes $start-${result.size - 1}/${result.size}\r\n" else ""
-                    try { it.getOutputStream().apply { write("HTTP/1.1 $status\r\nContent-Type: $type\r\nContent-Length: ${result.size - start}\r\nAccept-Ranges: bytes\r\n${contentRange}Connection: close\r\n\r\n".toByteArray()); write(result, start, result.size - start); flush() } } catch (_: java.io.IOException) { }
+                    try { it.getOutputStream().apply { write("HTTP/1.1 $status\r\nContent-Type: $type\r\nContent-Length: ${result.size - start}\r\nAccept-Ranges: bytes\r\n${contentRange}Connection: close\r\n\r\n".toByteArray()); if (request.contains("/download") && downloadChunkDelay > 0) {
+                        var cursor = start
+                        while (cursor < result.size) { val n = (result.size - cursor).coerceAtMost(8192); write(result, cursor, n); flush(); cursor += n; Thread.sleep(downloadChunkDelay) }
+                    } else { write(result, start, result.size - start); flush() } } } catch (_: java.io.IOException) { }
                 } }
             } catch (e: SocketException) { if (!socket.isClosed) throw e }
         }

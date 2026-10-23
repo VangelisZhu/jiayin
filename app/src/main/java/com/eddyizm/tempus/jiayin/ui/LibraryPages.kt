@@ -30,13 +30,14 @@ import sh.calvin.reorderable.*
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable fun LibraryPage(ui: HomeState, vm: JiayinViewModel, collection: (MusicList) -> Unit, menu: (Track) -> Unit, search: (SearchScope) -> Unit = {}, returnSearchPath: String? = null, returnSearch: () -> Unit = {}) {
-    var category by rememberSaveable { mutableStateOf(vm.repo.settings.getString("${vm.repo.account}.browse-library-category", "专辑") ?: "专辑") }
+    val scopedRepo = vm.repo
+    var category by rememberSaveable { mutableStateOf(scopedRepo.settings.getString("${scopedRepo.account}.browse-library-category", "专辑") ?: "专辑") }
     var sort by rememberSaveable { mutableStateOf("名称") }
-    var folder by rememberSaveable { mutableStateOf(vm.repo.settings.getString("${vm.repo.account}.browse-folder", "").orEmpty()) }
+    var folder by rememberSaveable { mutableStateOf(scopedRepo.settings.getString("${scopedRepo.account}.browse-folder", "").orEmpty()) }
     val request by vm.folderRequest.collectAsState()
     var requestSeen by rememberSaveable { mutableLongStateOf(0L) }
     LaunchedEffect(request) { if (request.request > requestSeen) { requestSeen = request.request; category = request.category; folder = request.path } }
-    LaunchedEffect(category, folder) { vm.repo.settings.edit().putString("${vm.repo.account}.browse-library-category", category).putString("${vm.repo.account}.browse-folder", folder).apply() }
+    LaunchedEffect(category, folder) { scopedRepo.settings.edit().putString("${scopedRepo.account}.browse-library-category", category).putString("${scopedRepo.account}.browse-folder", folder).apply() }
     var contextualScope by remember { mutableStateOf(SearchScope()) }
     val scope = when (category) { "歌手", "文件夹" -> contextualScope; "歌曲" -> SearchScope(SearchKind.SONGS); "专辑" -> SearchScope(SearchKind.ALBUMS); else -> SearchScope(SearchKind.PLAYLISTS) }
     val tracks = ui.library.tracks

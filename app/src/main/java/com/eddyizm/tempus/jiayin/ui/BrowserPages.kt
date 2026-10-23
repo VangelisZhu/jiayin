@@ -22,15 +22,16 @@ import kotlinx.coroutines.withContext
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable fun ArtistBrowser(ui: HomeState, vm: JiayinViewModel, open: (MusicList) -> Unit, search: (SearchScope) -> Unit, browserSearch: Boolean = false, onScopeChanged: (SearchScope) -> Unit = {}) {
-    var region by rememberSaveable { mutableStateOf(vm.repo.settings.getString("${vm.repo.account}.artist-region", "全部") ?: "全部") }
-    var type by rememberSaveable { mutableStateOf(vm.repo.settings.getString("${vm.repo.account}.artist-type", "全部") ?: "全部") }
+    val scopedRepo = vm.repo
+    var region by rememberSaveable { mutableStateOf(scopedRepo.settings.getString("${scopedRepo.account}.artist-region", "全部") ?: "全部") }
+    var type by rememberSaveable { mutableStateOf(scopedRepo.settings.getString("${scopedRepo.account}.artist-type", "全部") ?: "全部") }
     val artistFilterKey = listOf(ui.index, region, type)
     val artistResult by produceState<Pair<List<Any>, List<IndexedSection<ArtistEntry>>>?>(null, artistFilterKey) {
         value = artistFilterKey to withContext(Dispatchers.Default) { LibraryIndex.sections(ui.index.artists.filter { (region == "全部" || it.region == region) && (type == "全部" || it.profile.type == type) }) { it.section } }
     }
     val entries = artistResult?.takeIf { it.first == artistFilterKey }?.second
     val scrollStates = rememberSaveableStateHolder()
-    LaunchedEffect(region, type) { vm.repo.settings.edit().putString("${vm.repo.account}.artist-region", region).putString("${vm.repo.account}.artist-type", type).apply(); onScopeChanged(SearchScope(SearchKind.ARTISTS, region = region, artistType = type)) }
+    LaunchedEffect(region, type) { scopedRepo.settings.edit().putString("${scopedRepo.account}.artist-region", region).putString("${scopedRepo.account}.artist-type", type).apply(); onScopeChanged(SearchScope(SearchKind.ARTISTS, region = region, artistType = type)) }
     Column(Modifier.fillMaxSize()) {
         if (browserSearch) CompactTitle("搜索") { IconAction(R.drawable.ic_search, "搜索全部曲库") { search(SearchScope()) } }
         Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -51,13 +52,14 @@ import kotlinx.coroutines.withContext
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable fun FolderBrowser(ui: HomeState, vm: JiayinViewModel, menu: (Track) -> Unit, search: (SearchScope) -> Unit, location: String, setLocation: (String) -> Unit, returnSearchPath: String? = null, returnSearch: () -> Unit = {}, onScopeChanged: (SearchScope) -> Unit = {}) {
-    var flat by rememberSaveable { mutableStateOf(vm.repo.settings.getBoolean("${vm.repo.account}.folder-flat", false)) }
-    var region by rememberSaveable { mutableStateOf(vm.repo.settings.getString("${vm.repo.account}.folder-region", "全部") ?: "全部") }
+    val scopedRepo = vm.repo
+    var flat by rememberSaveable { mutableStateOf(scopedRepo.settings.getBoolean("${scopedRepo.account}.folder-flat", false)) }
+    var region by rememberSaveable { mutableStateOf(scopedRepo.settings.getString("${scopedRepo.account}.folder-region", "全部") ?: "全部") }
     var classify by remember { mutableStateOf(false) }
     val scrollStates = rememberSaveableStateHolder()
     val folder = ui.index.folders[location]
     val currentLocation = location.takeIf { folder != null } ?: ""
-    LaunchedEffect(currentLocation, region, flat) { vm.repo.settings.edit().putString("${vm.repo.account}.folder-region", region).putBoolean("${vm.repo.account}.folder-flat", flat).apply(); onScopeChanged(SearchScope(folder = currentLocation, region = region)) }
+    LaunchedEffect(currentLocation, region, flat) { scopedRepo.settings.edit().putString("${scopedRepo.account}.folder-region", region).putBoolean("${scopedRepo.account}.folder-flat", flat).apply(); onScopeChanged(SearchScope(folder = currentLocation, region = region)) }
     val folderFilterKey = listOf(ui.index, currentLocation, flat, region)
     val folderResult by produceState<Pair<List<Any>, List<IndexedSection<FolderNode>>>?>(null, folderFilterKey) {
         value = folderFilterKey to withContext(Dispatchers.Default) {

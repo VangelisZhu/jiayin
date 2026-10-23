@@ -163,6 +163,7 @@ class StorageRegressionTest {
                             } }
                             result.add("searchResult3", JsonObject().apply { add("song", gson.toJsonTree(songs)) })
                         }
+                        request.contains("/getArtists.view") -> result.add("artists", JsonObject())
                         request.contains("/getPlaylists.view") -> result.add("playlists", JsonObject().apply { add("playlist", gson.toJsonTree(listOf(mapOf("id" to "p1", "name" to "我的歌单")))) })
                         request.contains("/getPlaylist.view") -> result.add("playlist", JsonObject().apply { add("entry", gson.toJsonTree(tracks.take(1000).map { mapOf("id" to it.id) })) })
                         else -> error("Unexpected mutation or request: ${request.substringBefore('?')}")

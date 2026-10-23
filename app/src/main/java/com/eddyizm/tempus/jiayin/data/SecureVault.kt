@@ -21,17 +21,29 @@ class SecureVault(context: Context) {
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build())
         }.generateKey()
     }
-    @Synchronized fun put(name: String, value: String) {
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key()); updateAAD(name.toByteArray()) }
-        val result = cipher.iv + cipher.doFinal(value.toByteArray())
-        check(prefs.edit().putString(name, Base64.encodeToString(result, Base64.NO_WRAP)).commit())
+    @Synchronized fun put(name: String, value: String) = putAll(mapOf(name to value))
+    @Synchronized fun putAll(values: Map<String, String>) {
+        val editor = prefs.edit()
+        for ((name, value) in values) {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key()); updateAAD(name.toByteArray()) }
+            val result = cipher.iv + cipher.doFinal(value.toByteArray())
+            editor.putString(name, Base64.encodeToString(result, Base64.NO_WRAP))
+        }
+        check(editor.commit())
     }
-    @Synchronized fun get(name: String): String? = runCatching {
-        val raw = prefs.getString(name, null)?.let { Base64.decode(it, Base64.NO_WRAP) } ?: return null
+    @Synchronized fun get(name: String): String? = decode(name, prefs.getString(name, null))
+    fun authentication(account: String): Pair<String, String>? {
+        val snapshot = prefs.all
+        val token = decode("$account.token", snapshot["$account.token"] as? String) ?: return null
+        val salt = decode("$account.salt", snapshot["$account.salt"] as? String) ?: return null
+        return token to salt
+    }
+    private fun decode(name: String, value: String?): String? = runCatching {
+        val raw = value?.let { Base64.decode(it, Base64.NO_WRAP) } ?: return null
         val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
             init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, raw.copyOfRange(0, 12))); updateAAD(name.toByteArray())
         }
         String(cipher.doFinal(raw.copyOfRange(12, raw.size)))
     }.getOrNull()
-    fun remove(name: String) { prefs.edit().remove(name).apply() }
+    @Synchronized fun remove(name: String) { check(prefs.edit().remove(name).commit()) }
 }

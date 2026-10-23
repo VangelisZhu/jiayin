@@ -73,4 +73,7 @@ import java.util.List;
     public abstract void delete(String account, String kind, String id);
     @Query("DELETE FROM local_rows WHERE account=:account AND kind=:kind")
     public abstract void clear(String account, String kind);
+
+    @Query("DELETE FROM local_rows WHERE account=:account")
+    public abstract void removeAccount(String account);
 }

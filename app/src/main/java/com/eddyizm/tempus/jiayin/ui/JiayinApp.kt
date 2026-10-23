@@ -35,6 +35,19 @@ import kotlinx.coroutines.flow.map
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable fun JiayinApp(vm: JiayinViewModel, openPlayer: Boolean) {
+    val revision by vm.sessionRevision.collectAsState()
+    val serverState by vm.servers.collectAsState()
+    val pageStates = rememberSaveableStateHolder()
+    val knownPages = remember { mutableSetOf<String>() }
+    val ids = serverState.profiles.map { it.id }.toSet()
+    LaunchedEffect(ids) {
+        knownPages.filter { it.substringBefore(":") !in ids }.toList().forEach { pageStates.removeState(it); knownPages.remove(it) }
+    }
+    key(revision) { JiayinSessionApp(vm, if (revision == 0L) openPlayer else false, pageStates) { key -> knownPages.add(key); key } }
+}
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+@Composable private fun JiayinSessionApp(vm: JiayinViewModel, openPlayer: Boolean, pageStates: androidx.compose.runtime.saveable.SaveableStateHolder, pageKey: (String) -> String) {
+    val serverUi by vm.servers.collectAsState()
     val ui by vm.state.collectAsState()
     val searchState by vm.search.collectAsState()
     var searchReturn by remember { mutableStateOf(vm.searchOrigin) }
@@ -56,7 +69,6 @@ import kotlinx.coroutines.flow.map
     var newPlaylist by remember { mutableStateOf(false) }
     var renameList by remember { mutableStateOf<MusicList?>(null) }
     val snack = remember { SnackbarHostState() }
-    val pageStates = rememberSaveableStateHolder()
     val darkSystem = isSystemInDarkTheme()
     var theme by remember { mutableStateOf(vm.repo.settings.getString("theme", "system")) }
     val dark = theme == "dark" || (theme == "system" && darkSystem)
@@ -94,7 +106,18 @@ import kotlinx.coroutines.flow.map
     }
     MaterialTheme(colorScheme = colors, typography = Typography()) {
         Surface(Modifier.fillMaxSize()) {
-            if (!ui.configured) LoginScreen(ui, vm)
+            if (ui.preparationError != null) {
+                Column(Modifier.fillMaxSize().safeDrawingPadding().padding(28.dp), verticalArrangement = Arrangement.Center) {
+                    Text("本地数据准备未完成", style = MaterialTheme.typography.headlineSmall)
+                    Text(ui.preparationError.orEmpty(), Modifier.padding(vertical = 18.dp))
+                    Text("原下载会保留。请检查手机空间后重试；也可清空临时播放缓存腾出空间，已下载歌曲不会因此删除。", fontSize = 14.sp)
+                    Button({ vm.prepareLocalData() }, Modifier.padding(top = 20.dp)) { Text("重试本地准备") }
+                    TextButton({ vm.prepareLocalData(true) }) { Text("清空播放缓存并重试") }
+                }
+            } else if (!ui.configured) {
+                if (serverUi.profiles.isEmpty()) LoginScreen(ui, vm)
+                else ServerManagementPage(vm, allowBack = false)
+            }
             else Box(Modifier.fillMaxSize()) {
                 Scaffold(modifier = if (player) Modifier.clearAndSetSemantics { } else Modifier,
                     snackbarHost = { SnackbarHost(snack) },
@@ -111,7 +134,7 @@ import kotlinx.coroutines.flow.map
                 ) { padding ->
                     Box(Modifier.fillMaxSize().padding(padding)) {
                         Box(if (searchState.active) Modifier.fillMaxSize().clearAndSetSemantics { } else Modifier.fillMaxSize()) {
-                        if (!searchState.active) pageStates.SaveableStateProvider(vm.repo.account + ":" + if (route == "detail") "detail:${collection?.id}" else route) { when (route) {
+                        if (!searchState.active) pageStates.SaveableStateProvider(pageKey(vm.repo.account + ":" + if (route == "detail") "detail:${collection?.id}" else route)) { when (route) {
                             "home" -> HomePage(ui, vm, openCollection, openRoute, showPlayer, { menuTrack = it }, { newPlaylist = true })
                             "library" -> LibraryPage(ui, vm, openCollection, { menuTrack = it }, openSearch, searchReturn?.entryFolder, restoreSearch)
                             "search" -> SearchBrowser(ui, vm, openCollection, openSearch)
@@ -123,11 +146,12 @@ import kotlinx.coroutines.flow.map
                                 else CollectionPage(actual, ui, vm, backCollection, { menuTrack = it }, { renameList = actual }, { collection = it })
                             }
                             "history" -> TrackPage("最近听过", ui.library.tracks.sortedByDescending { ui.records[it.id]?.lastHeard ?: 0 }.filter { (ui.records[it.id]?.lastHeard ?: 0) > 0 }, ui, vm, { route = "my" }, { menuTrack = it })
-                            "settings" -> SettingsPage(vm, ui, theme ?: "system", { theme = it }, { route = "my" })
+                            "settings" -> SettingsPage(vm, ui, theme ?: "system", { theme = it }, { route = "my" }, { route = "servers" })
+                            "servers" -> ServerManagementPage(vm, back = { route = "settings" })
                             "downloads" -> DownloadsPage(ui, vm, { menuTrack = it }, { route = "my" })
                         } }
                         }
-                        if (searchState.active) pageStates.SaveableStateProvider(vm.repo.account + ":independent-search") { DedicatedSearch(ui, searchState, vm, { hit ->
+                        if (searchState.active) pageStates.SaveableStateProvider(pageKey(vm.repo.account + ":independent-search")) { DedicatedSearch(ui, searchState, vm, { hit ->
                             if (hit.kind == SearchKind.SONGS) {
                                 val songs = searchState.hits.filter { it.kind == SearchKind.SONGS }.mapNotNull { ui.index.tracks[it.id] }
                                 vm.start(songs, source = "搜索：${searchState.query}", index = songs.indexOfFirst { it.id == hit.id }.coerceAtLeast(0))
@@ -178,6 +202,9 @@ import kotlinx.coroutines.flow.map
                 }
             }, confirmButton = { TextButton({ playlistTarget = null }) { Text("完成") } })
         }
+        if (serverUi.busy && (serverUi.blocking || !ui.configured)) androidx.compose.ui.window.Dialog(onDismissRequest = {}, properties = androidx.compose.ui.window.DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false)) {
+            Surface(shape = RoundedCornerShape(24.dp)) { Row(Modifier.padding(24.dp), verticalAlignment = Alignment.CenterVertically) { CircularProgressIndicator(Modifier.size(28.dp)); Text(serverUi.status, Modifier.padding(start = 18.dp)) } }
+        }
         if (newPlaylist || renameList != null) {
             var name by remember(renameList) { mutableStateOf(renameList?.name.orEmpty()) }
             AlertDialog(onDismissRequest = { newPlaylist = false; renameList = null }, title = { Text(if (renameList == null) "新建歌单" else "歌单改名") }, text = { OutlinedTextField(name, { name = it }, label = { Text("歌单名称") }, singleLine = true) },
@@ -210,6 +237,7 @@ import kotlinx.coroutines.flow.map
         Text("开启后，仅发现乱码时向 LRCLIB 发送歌名和歌手；正常歌词不会自动匹配。可随时在设置关闭。", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(18.dp))
         Button({ vm.repo.settings.edit().putBoolean("auto-repair-lyrics", automaticLyrics).apply(); vm.login(address, user, password) }, Modifier.fillMaxWidth().height(54.dp), enabled = !ui.loading && address.isNotBlank() && user.isNotBlank() && password.isNotEmpty()) { Text(if (ui.loading) ui.status else "连接我的音乐") }
+        serverUiError(vm)?.let { Text(it, Modifier.padding(top = 12.dp), color = MaterialTheme.colorScheme.error) }
         ui.message?.let { Text(it, Modifier.padding(top = 18.dp), color = MaterialTheme.colorScheme.error) }
         Text("填写你自己的 Navidrome 或兼容 Subsonic 的音乐服务地址与账户，不要填写 NAS 管理页面地址。认证信息加密保存在本机。家音不提供公共曲库或共享账户。", Modifier.padding(top = 24.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
     }
@@ -300,3 +328,5 @@ import kotlinx.coroutines.flow.map
         if (retry != null) TextButton(retry, Modifier.padding(top = 14.dp)) { Text("重新连接 / 同步") }
     }
 }
+
+@Composable private fun serverUiError(vm: JiayinViewModel): String? { val s by vm.servers.collectAsState(); return s.error }

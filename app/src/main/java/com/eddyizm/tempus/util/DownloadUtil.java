@@ -195,7 +195,7 @@ public final class DownloadUtil {
         return downloaderManager;
     }
 
-    private static synchronized Cache getDownloadCache(Context context) {
+    public static synchronized Cache getDownloadCache(Context context) {
         if (downloadCache == null) {
             File downloadContentDirectory = new File(getDownloadDirectory(context), DOWNLOAD_CONTENT_DIRECTORY);
             downloadCache = new SimpleCache(downloadContentDirectory, new NoOpCacheEvictor(), getDatabaseProvider(context));
@@ -220,14 +220,17 @@ public final class DownloadUtil {
 
     private static synchronized void ensureDownloadManagerInitialized(Context context) {
         if (downloadManager == null) {
+            com.eddyizm.tempus.jiayin.data.AccountDownloads.migrate(context, getDatabaseProvider(context), getDownloadCache(context));
             downloadManager = new DownloadManager(
                     context,
                     getDatabaseProvider(context),
                     getDownloadCache(context),
-                    getHttpDataSourceFactory(),
+                    com.eddyizm.tempus.jiayin.data.AccountDownloads.enabled()
+                            ? com.eddyizm.tempus.jiayin.data.AccountDownloads.networkFactory(context, getHttpDataSourceFactory()) : getHttpDataSourceFactory(),
                     Executors.newFixedThreadPool(6)
             );
 
+            if (com.eddyizm.tempus.jiayin.data.AccountDownloads.enabled()) downloadManager.pauseDownloads();
             if (Preferences.isDownloadWifiOnly()) {
                 downloadManager.setRequirements(new Requirements(Requirements.NETWORK_UNMETERED));
             }

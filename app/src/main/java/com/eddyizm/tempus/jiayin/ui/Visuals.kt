@@ -43,6 +43,7 @@ import com.eddyizm.tempus.R
 import com.eddyizm.tempus.jiayin.core.digest
 import com.eddyizm.tempus.jiayin.data.JiayinRepository
 import com.eddyizm.tempus.glide.CustomGlideRequest
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlin.math.*
@@ -56,32 +57,75 @@ object Covers {
     private val memory = object : android.util.LruCache<String, CoverVisual>(24 * 1024 * 1024) {
         override fun sizeOf(key: String, value: CoverVisual) = value.bitmap.width * value.bitmap.height * 4
     }
+    private val cacheLock = Any()
+    private val calls = java.util.concurrent.ConcurrentHashMap<okhttp3.Call, String>()
+    @JvmStatic fun accountFile(context: Context, account: String, cover: String): java.io.File {
+        val repo = JiayinRepository.get(context).scoped()
+        check(repo.configured && repo.account == account) { "封面所属账户已退出或切换" }
+        kotlinx.coroutines.runBlocking(Dispatchers.IO) { load(context, cover) }
+        check(repo.currentSession()) { "封面所属账户已切换" }
+        return java.io.File(context.filesDir, "account-covers/$account/${digest(cover)}.png").also { check(it.exists()) }
+    }
+    fun cancelAccount(account: String) { calls.entries.filter { it.value == account }.forEach { it.key.cancel() } }
+    fun removeAccount(context: Context, account: String) {
+        cancelAccount(account)
+        synchronized(cacheLock) {
+            memory.snapshot().keys.filter { it.startsWith(account + ":") }.forEach { memory.remove(it) }
+            val folder = java.io.File(context.filesDir, "account-covers/$account")
+            check(!folder.exists() || folder.deleteRecursively()) { "封面清理未完成，请重试移除账户" }
+        }
+    }
     suspend fun load(context: Context, cover: String): CoverVisual? = withContext(Dispatchers.IO) {
         if (cover.isBlank()) return@withContext null
-        val repo = JiayinRepository.get(context)
+        val repo = JiayinRepository.get(context).scoped()
+        if (!repo.configured) return@withContext null
         val key = "${repo.account}:$cover"
         memory.get(key)?.let { return@withContext it }
-        runCatching {
-            // A Glide content:// request whose provider starts another Glide request deadlocks
-            // once the source pool fills with pending cover reads. Load the source directly.
-            val source = if (cover.startsWith("ir_")) Uri.parse(String(Base64.decode(cover.removePrefix("ir_"), Base64.URL_SAFE or Base64.NO_WRAP)))
-                else Uri.parse(CustomGlideRequest.createUrl(cover, 512))
-            val target = Glide.with(context).asBitmap().load(source).diskCacheStrategy(DiskCacheStrategy.ALL).submit(512, 512)
-            try {
-                val bitmap = target.get(20, TimeUnit.SECONDS).copy(Bitmap.Config.ARGB_8888, false)
-                val palette = Palette.from(bitmap).maximumColorCount(12).generate()
-                val color = palette.lightVibrantSwatch?.rgb ?: palette.vibrantSwatch?.rgb ?: palette.dominantSwatch?.rgb ?: 0xFF718D91.toInt()
-                val pixels = IntArray(64)
-                for (i in pixels.indices) pixels[i] = bitmap.getPixel((i % 8 * bitmap.width / 8), (i / 8 * bitmap.height / 8))
-                CoverVisual(bitmap.asImageBitmap(), Color(color), digest(pixels.joinToString())).also { memory.put(key, it) }
-            } finally { Glide.with(context).clear(target) }
-        }.getOrNull()
+        val file = java.io.File(context.filesDir, "account-covers/${repo.account}/${digest(cover)}.png")
+        try {
+            val bytes = if (file.exists()) file.readBytes() else {
+                if (repo.offline || !repo.currentSession()) return@withContext null
+                val url = if (cover.startsWith("ir_")) String(Base64.decode(cover.removePrefix("ir_"), Base64.URL_SAFE or Base64.NO_WRAP))
+                    else repo.authenticatedUrl("getCoverArt", cover, mapOf("size" to "512"))
+                val call = repo.http.newCall(okhttp3.Request.Builder().url(url).build())
+                calls[call] = repo.account
+                try { call.execute().use { response -> check(response.isSuccessful); response.body!!.byteStream().use { input ->
+                    val output = java.io.ByteArrayOutputStream(); val buffer = ByteArray(8192)
+                    while (true) { val n = input.read(buffer); if (n < 0) break; check(output.size() + n <= 8 * 1024 * 1024) { "封面文件过大" }; output.write(buffer, 0, n) }
+                    output.toByteArray()
+                } } }
+                finally { calls.remove(call) }
+            }
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            if (!repo.currentSession()) return@withContext null
+            val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            val options = android.graphics.BitmapFactory.Options()
+            while (maxOf(bounds.outWidth, bounds.outHeight) / options.inSampleSize.coerceAtLeast(1) > 1024) options.inSampleSize = options.inSampleSize.coerceAtLeast(1) * 2
+            val decoded = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options) ?: return@withContext null
+            val bitmap = decoded.copy(Bitmap.Config.ARGB_8888, false)
+            synchronized(cacheLock) {
+                if (!repo.currentSession()) return@withContext null
+                if (!file.exists()) {
+                file.parentFile?.mkdirs()
+                val temp = java.io.File(file.parentFile, file.name + ".${java.util.UUID.randomUUID()}.tmp")
+                try { temp.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }; if (!temp.renameTo(file)) temp.delete() } finally { temp.delete() }
+            }
+            }
+            val palette = Palette.from(bitmap).maximumColorCount(12).generate()
+            val color = palette.lightVibrantSwatch?.rgb ?: palette.vibrantSwatch?.rgb ?: palette.dominantSwatch?.rgb ?: 0xFF718D91.toInt()
+            val pixels = IntArray(64)
+            for (i in pixels.indices) pixels[i] = bitmap.getPixel((i % 8 * bitmap.width / 8), (i / 8 * bitmap.height / 8))
+            CoverVisual(bitmap.asImageBitmap(), Color(color), digest(pixels.joinToString())).also { synchronized(cacheLock) { if (repo.currentSession()) memory.put(key, it) } }
+        } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (_: Exception) { null }
     }
+
 }
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable fun coverVisual(cover: String): CoverVisual? {
     val context = LocalContext.current
-    val visual by produceState<CoverVisual?>(null, cover) { value = Covers.load(context, cover) }
+    val account = JiayinRepository.get(context).account
+    val visual by produceState<CoverVisual?>(null, account, cover) { value = Covers.load(context, cover) }
     return visual
 }
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
