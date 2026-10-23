@@ -1,6 +1,8 @@
 # 家音 / Jiayin
 
-面向自建音乐库的开源 Android 播放器。基于 [Tempus v4.30.0](https://github.com/eddyizm/tempus/tree/v4.30.0)，使用 Kotlin、Jetpack Compose 与 Media3，继续遵循 [GPL-3.0](LICENSE)。
+适合使用群晖（Synology）、威联通（QNAP）等 NAS 作为音乐服务器的开源 Android 音乐播放器。连接 NAS 上部署的 Navidrome 或兼容 Subsonic 服务，随时播放自己的音乐库。
+
+基于 [Tempus v4.30.0](https://github.com/eddyizm/tempus/tree/v4.30.0)，使用 Kotlin、Jetpack Compose 与 Media3，继续遵循 [GPL-3.0](LICENSE)。
 
 **这是预览版，目前主要界面为简体中文。你需要自己的 Navidrome 或兼容 Subsonic 的音乐服务；本项目不提供音乐、公共服务器或共享账户。**
 
