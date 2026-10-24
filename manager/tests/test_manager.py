@@ -36,7 +36,8 @@ def env(tmp_path):
 
 
 def first(app):
-    return app.state.store.all("track")[0]
+    # Filesystem enumeration order differs between Windows and Linux.
+    return next(row for row in app.state.store.all("track") if row["path"] == "待整理/01.wav")
 
 
 def apply_one(app, values):
