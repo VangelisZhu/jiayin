@@ -52,11 +52,11 @@ import sh.calvin.reorderable.*
     val repo = com.eddyizm.tempus.jiayin.data.JiayinRepository.get(androidx.compose.ui.platform.LocalContext.current)
     val reduced = animationsReduced()
     val progress = (state.queue.positionMs.toFloat() / (t.duration * 1000f).coerceAtLeast(1f)).coerceIn(0f, 1f)
-    Box(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp).height(56.dp)) {
+    Box(Modifier.fillMaxWidth().padding(horizontal = LocalPhoneLayout.current.gutter, vertical = 8.dp).height(LocalPhoneLayout.current.miniHeight)) {
         Surface(onClick = open, modifier = Modifier.fillMaxSize(), shape = RoundedCornerShape(30.dp),
             color = if (dark) Color(0xFF28312D) else Color.White, shadowElevation = 3.dp) {
             Row(Modifier.fillMaxSize().padding(start = 62.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(if (state.buffering) "${t.title} · 正在缓冲…" else "${t.title} · ${t.artist}", Modifier.weight(1f).padding(end = 4.dp), fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(if (state.buffering) "${t.title} · 正在缓冲…" else "${t.title} · ${t.artist}", Modifier.weight(1f).padding(end = 4.dp), fontSize = 14.sp, maxLines = if (LocalPhoneLayout.current.largeText && !LocalPhoneLayout.current.shortWindow) 2 else 1, overflow = TextOverflow.Ellipsis)
                 Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
                     Canvas(Modifier.size(29.dp)) {
                         drawCircle(foreground.copy(alpha = .14f), style = Stroke(1.5.dp.toPx()))
@@ -94,7 +94,9 @@ import sh.calvin.reorderable.*
     BackHandler { if (lyrics) lyrics = false else close() }
     CompositionLocalProvider(LocalContentColor provides foreground) {
         Box(Modifier.fillMaxSize().pointerInput(Unit) {
-            awaitPointerEventScope { while (true) awaitPointerEvent(PointerEventPass.Final).changes.forEach { it.consume() } }
+            // Own the overlay hit path so taps cannot reach the page behind it.
+            // Consuming Final-pass changes here would cancel child scroll/drag gestures.
+            awaitPointerEventScope { while (true) awaitPointerEvent(PointerEventPass.Final) }
         }) {
             AmbientBackground(visual, dark, lyrics, reduced)
             Column(Modifier.fillMaxSize().safeDrawingPadding()) {
@@ -108,7 +110,8 @@ import sh.calvin.reorderable.*
                 }
                 if (t == null) Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) { Text("从曲库挑一首喜欢的歌吧") }
                 else {
-                    BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+                    AdaptivePlayerBody(lyrics, artwork = {
+                    BoxWithConstraints(Modifier.fillMaxSize()) {
                         val showHint = maxHeight >= 300.dp
                         val recordSize = minOf(maxWidth - 28.dp, maxHeight - if (showHint) 44.dp else 8.dp, 390.dp).coerceAtLeast(64.dp)
                         if (lyrics) LyricsPanel(ui, playback, vm, foreground, reduced, { matching = true }, { i, line -> correctionIndex = i; correction = line }, { lyrics = false })
@@ -117,40 +120,43 @@ import sh.calvin.reorderable.*
                             if (showHint) Text("轻点唱片，查看歌词", Modifier.clickable { lyrics = true }.padding(12.dp), fontSize = 11.sp, color = foreground.copy(alpha = .75f))
                         }
                     }
-                    Row(Modifier.fillMaxWidth().padding(start = 32.dp, end = 20.dp, top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    }, controls = {
+                    val compact = LocalPlayerCompact.current
+                    Row(Modifier.fillMaxWidth().padding(start = LocalPhoneLayout.current.gutter, end = 16.dp, top = if (compact) 0.dp else 10.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text(t.title, fontSize = 25.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            Text(t.artist, Modifier.clickable { artist(t) }.padding(top = 9.dp, bottom = 6.dp), fontSize = 14.sp, color = foreground.copy(alpha = .75f))
+                            Text(t.title, fontSize = if (compact) 20.sp else 25.sp, fontWeight = FontWeight.SemiBold, maxLines = if (compact) 1 else 2, overflow = TextOverflow.Ellipsis)
+                            Text(t.artist, Modifier.clickable { artist(t) }.padding(top = if (compact) 2.dp else 9.dp, bottom = if (compact) 0.dp else 6.dp), fontSize = if (compact) 12.sp else 14.sp, color = foreground.copy(alpha = .75f))
                         }
                         IconAction(if (actual?.starred == true) R.drawable.ic_favorite else R.drawable.ic_favorites_outlined, "喜欢", tint = foreground) { actual?.let { vm.favorite(it) } }
                     }
                     if (playback.error != null || playback.cause == PauseCause.FOCUS || playback.cause == PauseCause.HEADSET) {
                         Text(playback.error ?: if (playback.cause == PauseCause.HEADSET) "耳机已断开，点播放继续" else "音乐被其他应用暂停，点播放原位继续", Modifier.padding(horizontal = 32.dp, vertical = 8.dp), fontSize = 11.sp, color = foreground.copy(alpha = .8f))
-                    } else Spacer(Modifier.height(16.dp))
+                    } else Spacer(Modifier.height(if (compact) 0.dp else 16.dp))
                     PlayerProgress(playback, vm, foreground)
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = if (compact) 12.dp else 24.dp, vertical = if (compact) 4.dp else 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                         IconAction(R.drawable.ic_shuffle, if (playback.queue.shuffled) "关闭随机" else "开启随机", tint = if (playback.queue.shuffled) foreground else foreground.copy(alpha = .45f)) { vm.command("shuffle") }
                         IconAction(R.drawable.ic_skip_previous, "上一首", tint = foreground) { vm.command("previous") }
-                        IconButton({ vm.command("toggle") }, Modifier.size(72.dp).background(foreground, CircleShape)) {
+                        IconButton({ vm.command("toggle") }, Modifier.size(if (compact) 56.dp else 72.dp).background(foreground, CircleShape)) {
                             if (playback.buffering) CircularProgressIndicator(Modifier.size(32.dp), color = if (dark) Color(0xFF27322D) else Color(0xFFE7EEEA), strokeWidth = 2.dp)
                             else AppIcon(if (playback.playing) R.drawable.ic_pause else R.drawable.ic_play, if (playback.playing) "暂停" else "继续播放", Modifier.size(34.dp), if (dark) Color(0xFF27322D) else Color(0xFFE7EEEA))
                         }
                         IconAction(R.drawable.ic_skip_next, "下一首", tint = foreground) { vm.command("next") }
                         IconAction(if (playback.queue.repeat == 1) R.drawable.ic_repeat_one else R.drawable.ic_repeat, when (playback.queue.repeat) { 1 -> "单曲循环"; 2 -> "列表循环"; else -> "顺序播放" }, tint = if (playback.queue.repeat != 0) foreground else foreground.copy(alpha = .45f)) { vm.command("repeat") }
                     }
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                    FlowRow(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = if (compact) 0.dp else 8.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
                         TextButton({ lyrics = !lyrics }) { Text(if (lyrics) "唱片" else "歌词", color = foreground, fontSize = 13.sp) }
                         TextButton({ queue = true }) { AppIcon(R.drawable.ic_queue, "队列", tint = foreground); Spacer(Modifier.width(6.dp)); Text("队列", color = foreground, fontSize = 13.sp) }
                         TextButton({ addToPlaylist(t) }) { AppIcon(R.drawable.ic_playlist_add, "加入歌单", tint = foreground) }
                         TextButton({ vm.download(listOf(t)) }) { AppIcon(R.drawable.ic_download, "下载", tint = foreground) }
                     }
+                    })
                 }
             }
         }
     }
     if (queue) QueueSheet(ui, playback, vm) { queue = false }
     if (timer) AlertDialog(onDismissRequest = { timer = false }, title = { Text("睡眠定时") }, text = {
-        Column { if (playback.sleepUntil > 0) Text("剩余约 ${(playback.sleepUntil - System.currentTimeMillis()).coerceAtLeast(0) / 60000} 分钟")
+        Column(Modifier.verticalScroll(rememberScrollState())) { if (playback.sleepUntil > 0) Text("剩余约 ${(playback.sleepUntil - System.currentTimeMillis()).coerceAtLeast(0) / 60000} 分钟")
             listOf(15, 30, 45, 60, 90, 0).forEach { minutes -> TextButton({ vm.command("sleep") { putInt("minutes", minutes) }; timer = false }) { Text(if (minutes == 0) "关闭定时" else "$minutes 分钟后暂停") } }
         }
     }, confirmButton = { TextButton({ timer = false }) { Text("返回") } })
@@ -166,7 +172,7 @@ import sh.calvin.reorderable.*
     var seeking by remember(playback.current?.id) { mutableStateOf(false) }
     var value by remember(playback.current?.id) { mutableFloatStateOf(0f) }
     Column(Modifier.padding(horizontal = 28.dp)) {
-        Slider(if (seeking) value else (playback.queue.positionMs.toFloat() / duration).coerceIn(0f, 1f), { value = it; seeking = true }, onValueChangeFinished = { vm.command("seek") { putLong("position", (value * duration).toLong()) }; seeking = false }, modifier = Modifier.fillMaxWidth().height(28.dp),
+        Slider(if (seeking) value else (playback.queue.positionMs.toFloat() / duration).coerceIn(0f, 1f), { value = it; seeking = true }, onValueChangeFinished = { vm.command("seek") { putLong("position", (value * duration).toLong()) }; seeking = false }, modifier = Modifier.fillMaxWidth().height(48.dp),
             thumb = { Box(Modifier.size(16.dp), contentAlignment = Alignment.Center) { Box(Modifier.size(10.dp).background(foreground, CircleShape)) } },
             track = { slider -> Canvas(Modifier.fillMaxWidth().height(16.dp)) {
                 val y = size.height / 2
@@ -211,7 +217,7 @@ import sh.calvin.reorderable.*
         }
     }
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), horizontalArrangement = Arrangement.Center) {
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp), horizontalArrangement = Arrangement.Center) {
             TextButton({ bilingual = !bilingual }) { Text(if (bilingual) "双语" else "原文", color = color, fontSize = 12.sp) }
             TextButton(match) { Text("匹配歌词", color = color, fontSize = 12.sp) }
             if (lines.isNotEmpty()) TextButton({ vm.translate() }, enabled = !ui.lyricsBusy) { Text(if (ui.lyricsBusy) "处理中…" else "翻译为中文", color = color, fontSize = 12.sp) }
@@ -271,7 +277,7 @@ import sh.calvin.reorderable.*
             }
             if (armed) Text("松手跳转到选中的歌词", Modifier.align(Alignment.CenterHorizontally), color = color, fontSize = 11.sp)
             if (!follow && !armed) TextButton({ follow = true; scope.launch { scroll.animateScrollToItem(current, -(scroll.layoutInfo.viewportEndOffset / 3)) } }, Modifier.align(Alignment.CenterHorizontally)) { Text("回到当前", color = color) }
-            Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                 TextButton({ lyrics?.let { vm.editLyrics(it.copy(offsetMs = it.offsetMs - 500)) } }) { Text("慢 0.5s", color = color, fontSize = 10.sp) }
                 TextButton({ lines.getOrNull(current)?.let { edit(current, it) } }) { Text(if (lyrics?.machine == true) "机器翻译 · 校正" else "校正译文", fontSize = 10.sp, color = color.copy(alpha = .7f)) }
                 TextButton({ lyrics?.let { vm.editLyrics(it.copy(offsetMs = it.offsetMs + 500)) } }) { Text("快 0.5s", color = color, fontSize = 10.sp) }

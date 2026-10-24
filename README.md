@@ -25,9 +25,7 @@
 
 <img src="docs/screenshots/home.png" width="240" alt="首页与悬浮播放器"/> <img src="docs/screenshots/player.png" width="240" alt="渐变唱片播放器"/> <img src="docs/screenshots/lyrics.png" width="240" alt="日语双语示例歌词"/>
 
-<img src="docs/screenshots/search-browser.png" width="240" alt="搜索浏览与放大镜"/> <img src="docs/screenshots/artist-index.png" width="240" alt="歌手字母索引"/> <img src="docs/screenshots/folder-hierarchy.png" width="240" alt="文件夹层级浏览"/>
-
-<img src="docs/screenshots/server-management.png" width="240" alt="多服务器管理（生成测试数据）"/> <img src="docs/screenshots/server-add.png" width="240" alt="添加服务器"/>
+[查看更多界面](docs/UI.md) · [屏幕适配与验证范围](docs/COMPATIBILITY.md)
 
 ## 功能
 

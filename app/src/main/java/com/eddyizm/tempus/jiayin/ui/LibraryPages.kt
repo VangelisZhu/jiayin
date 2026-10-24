@@ -44,7 +44,7 @@ import sh.calvin.reorderable.*
     val sorted = remember(tracks, sort) { if (sort == "最近加入") tracks.sortedByDescending { it.created } else tracks.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.title }) }
     val categoryStates = rememberSaveableStateHolder()
     var options by remember { mutableStateOf(false) }
-    Column(Modifier.fillMaxSize()) {
+    AdaptiveBrowserPage(header = {
         CompactTitle("曲库") {
             IconAction(R.drawable.ic_search, "搜索当前曲库分类") { search(scope) }
             Box { IconAction(R.drawable.ic_more_vert, "曲库选项") { options = true }
@@ -56,6 +56,7 @@ import sh.calvin.reorderable.*
             Text("${tracks.size} 首歌曲", Modifier.weight(1f), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             TextButton({ sort = if (sort == "名称") "最近加入" else "名称" }) { AppIcon(R.drawable.ic_sort_list, "排序"); Text(sort, fontSize = 12.sp) }
         }
+    }, content = {
         categoryStates.SaveableStateProvider(category) { when (category) {
             "歌手" -> ArtistBrowser(ui, vm, collection, search, onScopeChanged = { contextualScope = it })
             "文件夹" -> FolderBrowser(ui, vm, menu, search, folder, { folder = it }, returnSearchPath, returnSearch, { contextualScope = it })
@@ -72,7 +73,7 @@ import sh.calvin.reorderable.*
             "专辑" -> {
                 val albums = remember(sorted) { sorted.groupBy { it.albumId.ifBlank { "${it.album}:${artistKey(it)}" } }.values.toList() }
                 val scroll = rememberLazyGridState()
-                LazyVerticalGrid(GridCells.Fixed(2), state = scroll, contentPadding = PaddingValues(24.dp), horizontalArrangement = Arrangement.spacedBy(18.dp), verticalArrangement = Arrangement.spacedBy(24.dp)) {
+                LazyVerticalGrid(GridCells.Adaptive(LocalPhoneLayout.current.albumMinimum), state = scroll, contentPadding = PaddingValues(LocalPhoneLayout.current.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(24.dp)) {
                     items(albums, key = { it.first().albumId.ifBlank { "${it.first().album}:${artistKey(it.first())}" } }) { album ->
                         val t = album.first(); val ordered = album.sortedWith(compareBy<Track> { it.disc }.thenBy { it.number })
                         Column(Modifier.clickable { collection(MusicList("album:${t.albumId.ifBlank { artistKey(t) + t.album }}", t.album.ifBlank { "未命名专辑" }, ordered.map { it.id }, t.cover)) }) {
@@ -88,7 +89,7 @@ import sh.calvin.reorderable.*
                 if (ui.library.playlists.isEmpty()) item { EmptyState("还没有歌单", "从歌曲菜单加入歌单。") }
             }
         } }
-    }
+    })
 }
 
 /** Fit the whole category bar when possible; retain full labels and touch targets at large fonts. */
@@ -137,7 +138,7 @@ import sh.calvin.reorderable.*
 @Composable fun TrackPage(title: String, tracks: List<Track>, ui: HomeState, vm: JiayinViewModel, back: () -> Unit, menu: (Track) -> Unit) {
     Column {
         PageTitle(title, "${tracks.size} 首", back)
-        Row(Modifier.padding(horizontal = 24.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        FlowRow(Modifier.padding(horizontal = LocalPhoneLayout.current.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Button({ vm.start(tracks, source = title) }) { Text("播放全部") }
             OutlinedButton({ vm.start(tracks, true, title) }) { AppIcon(R.drawable.ic_shuffle, "随机播放"); Text("随机播放") }
         }
@@ -189,10 +190,8 @@ import sh.calvin.reorderable.*
                 Column(Modifier.padding(horizontal = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     PlaylistCover(list, ui.library.tracks, Modifier.size(172.dp)); Text(list.name, Modifier.padding(top = 20.dp), fontSize = 28.sp, fontWeight = FontWeight.SemiBold)
                     Text("${tracks.size} 首${if (list.pending) " · 本地已保存，等待同步" else ""}", Modifier.padding(top = 10.dp, bottom = 22.dp), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Button({ vm.start(tracks, source = list.name) }, Modifier.weight(1f).height(48.dp)) { AppIcon(R.drawable.ic_play, "播放全部"); Spacer(Modifier.width(6.dp)); Text("播放全部") }
-                        OutlinedButton({ vm.start(tracks, true, list.name) }, Modifier.weight(1f).height(48.dp)) { AppIcon(R.drawable.ic_shuffle, "随机播放"); Spacer(Modifier.width(6.dp)); Text("随机播放") }
-                    }
+                    ActionPair(first = { m -> Button({ vm.start(tracks, source = list.name) }, m.heightIn(min = 48.dp)) { AppIcon(R.drawable.ic_play, "播放全部"); Spacer(Modifier.width(6.dp)); Text("播放全部") } },
+                        second = { m -> OutlinedButton({ vm.start(tracks, true, list.name) }, m.heightIn(min = 48.dp)) { AppIcon(R.drawable.ic_shuffle, "随机播放"); Spacer(Modifier.width(6.dp)); Text("随机播放") } })
                     TextButton({ vm.download(tracks, list.takeIf { editable }) }) { AppIcon(R.drawable.ic_download, "下载"); Text("下载此歌单") }
                 }
             }
@@ -216,8 +215,8 @@ import sh.calvin.reorderable.*
     val tracks = ui.recommendations.mapNotNull { byId[it.id] }
     LazyColumn {
         item { PageTitle("为你挑选", "只听你的曲库，越听越懂你") { IconAction(R.drawable.ic_refresh, "换一批") { vm.recommendations() } } }
-        item { Row(Modifier.padding(horizontal = 24.dp, vertical = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) { Button({ vm.start(tracks, source = "今日推荐") }, Modifier.weight(1f)) { Text("播放推荐") }; OutlinedButton({ vm.start(tracks, true, "今日推荐") }, Modifier.weight(1f)) { AppIcon(R.drawable.ic_shuffle, "随机播放"); Text("随机播放") } } }
-        item { Row(Modifier.padding(horizontal = 24.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { AssistChip({ vm.recommendations() }, label = { Text("今日推荐") }); AssistChip({ vm.rediscover() }, label = { Text("冷门再发现") }) } }
+        item { ActionPair(Modifier.padding(horizontal = LocalPhoneLayout.current.gutter, vertical = 16.dp), first = { m -> Button({ vm.start(tracks, source = "今日推荐") }, m) { Text("播放推荐") } }, second = { m -> OutlinedButton({ vm.start(tracks, true, "今日推荐") }, m) { AppIcon(R.drawable.ic_shuffle, "随机播放"); Text("随机播放") } }) }
+        item { FlowRow(Modifier.padding(horizontal = 24.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { AssistChip({ vm.recommendations() }, label = { Text("今日推荐") }); AssistChip({ vm.rediscover() }, label = { Text("冷门再发现") }) } }
         itemsIndexed(ui.recommendations, key = { _, r -> r.id }) { i, recommendation -> byId[recommendation.id]?.let { t -> SongRow(t, reason = recommendation.reason, action = { vm.start(tracks, source = "为你挑选", index = i) }, more = { menu(t) }) } }
     }
 }

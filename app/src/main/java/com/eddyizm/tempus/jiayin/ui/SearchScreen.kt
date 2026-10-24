@@ -55,12 +55,13 @@ import kotlinx.coroutines.delay
     val exit = { keyboard?.hide(); vm.hideSearch() }
     BackHandler { if (ime) keyboard?.hide() else exit() }
     LaunchedEffect(Unit) { if (state.focusKeyboard) { delay(100); focus.requestFocus(); keyboard?.show() } }
-    Surface(Modifier.fillMaxSize().pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent(PointerEventPass.Final).changes.forEach { it.consume() } } }) {
-        Column(Modifier.fillMaxSize()) {
+    // Register this overlay as the hit target without cancelling its children's scrolling.
+    Surface(Modifier.fillMaxSize().pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent(PointerEventPass.Final) } }) {
+        AdaptiveBrowserPage(header = {
             Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconAction(R.drawable.ic_arrow_back, "返回搜索来源") { if (ime) keyboard?.hide() else exit() }
-                BasicTextField(state.query, { vm.updateSearch(it) }, modifier = Modifier.weight(1f).height(48.dp).background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(14.dp)).focusRequester(focus).semantics { contentDescription = "搜索关键词" }, singleLine = true, textStyle = TextStyle(color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp), cursorBrush = SolidColor(MaterialTheme.colorScheme.primary), keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { vm.rememberSearch(); keyboard?.hide() }), decorationBox = { field ->
-                    Row(Modifier.fillMaxSize().padding(start = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                BasicTextField(state.query, { vm.updateSearch(it) }, modifier = Modifier.weight(1f).heightIn(min = 48.dp).background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(14.dp)).focusRequester(focus).semantics { contentDescription = "搜索关键词" }, singleLine = true, textStyle = TextStyle(color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp), cursorBrush = SolidColor(MaterialTheme.colorScheme.primary), keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { vm.rememberSearch(); keyboard?.hide() }), decorationBox = { field ->
+                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(start = 12.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                         AppIcon(R.drawable.ic_search, "搜索"); Spacer(Modifier.width(8.dp))
                         Box(Modifier.weight(1f)) { if (state.query.isEmpty()) Text("搜索歌曲、歌手、专辑…", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1); field() }
                         if (state.query.isNotEmpty()) IconAction(R.drawable.ic_close, "清空搜索") { vm.updateSearch("") } else Spacer(Modifier.width(12.dp))
@@ -79,7 +80,8 @@ import kotlinx.coroutines.delay
                 else -> SearchKind.entries
             }
             FilterChips(kinds.map { it.label }, (if (state.scope.kind != SearchKind.ALL) state.scope.kind else state.category).label) { label -> vm.updateSearch(state.query, category = SearchKind.entries.first { it.label == label }) }
-            LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = resultScroll, contentPadding = PaddingValues(bottom = 24.dp)) {
+        }, content = {
+            LazyColumn(Modifier.fillMaxSize(), state = resultScroll, contentPadding = PaddingValues(bottom = 24.dp)) {
                 if (state.query.isBlank()) {
                     item { Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = 12.dp), verticalAlignment = Alignment.CenterVertically) { Text("最近搜索", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium); TextButton({ vm.deleteSearchHistory() }, enabled = state.history.isNotEmpty()) { Text("清空记录") } } }
                     items(state.history, key = { normalizeSearch(it.query) }) { h -> ListItem(headlineContent = { Text(h.query) }, trailingContent = { IconAction(R.drawable.ic_close, "删除搜索记录：${h.query}") { vm.deleteSearchHistory(h.query) } }, modifier = Modifier.clickable { vm.updateSearch(h.query) }) }
@@ -99,7 +101,7 @@ import kotlinx.coroutines.delay
                     if (state.hits.size > count) item { TextButton({ count += 50 }, Modifier.fillMaxWidth()) { Text("加载更多") } }
                 }
             }
-        }
+        })
     }
     if (scopePicker) AlertDialog(onDismissRequest = { scopePicker = false }, title = { Text("搜索范围") }, text = { Column {
         Text(state.scope.label)

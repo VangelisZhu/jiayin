@@ -32,22 +32,22 @@ import kotlinx.coroutines.withContext
     val entries = artistResult?.takeIf { it.first == artistFilterKey }?.second
     val scrollStates = rememberSaveableStateHolder()
     LaunchedEffect(region, type) { scopedRepo.settings.edit().putString("${scopedRepo.account}.artist-region", region).putString("${scopedRepo.account}.artist-type", type).apply(); onScopeChanged(SearchScope(SearchKind.ARTISTS, region = region, artistType = type)) }
-    Column(Modifier.fillMaxSize()) {
+    AdaptiveBrowserPage(header = {
         if (browserSearch) CompactTitle("搜索") { IconAction(R.drawable.ic_search, "搜索全部曲库") { search(SearchScope()) } }
-        Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             ChoiceFilter("", if (region == "全部") "全部地区" else region, listOf("全部地区") + DirectoryRegions.choices.drop(1)) { region = if (it == "全部地区") "全部" else it }
             ChoiceFilter("", if (type == "全部") "全部类型" else type, listOf("全部类型", "男", "女", "乐队/组合", "未分类")) { type = if (it == "全部类型") "全部" else it }
-            Spacer(Modifier.weight(1f))
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 10.dp)) { Text("按拼音 / A–Z", Modifier.weight(1f), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant); Text("${entries.orEmpty().sumOf { it.entries.size }} 位歌手", fontSize = 12.sp) }
         if (entries?.isEmpty() == true) EmptyState("暂无符合条件的歌手", "可调整地区或类型；在歌手主页补充分类。")
+    }, content = {
         scrollStates.SaveableStateProvider("$region:$type") {
         val state = rememberLazyListState()
-        if (entries != null) IndexedBrowser(entries.orEmpty(), state, { it.id }, Modifier.weight(1f)) { artist ->
+        if (entries != null) IndexedBrowser(entries.orEmpty(), state, { it.id }, Modifier.fillMaxSize()) { artist ->
             ListItem(headlineContent = { Text(artist.name, maxLines = 1, overflow = TextOverflow.Ellipsis) }, supportingContent = { Text("${artist.tracks.size} 首 · ${artist.region}", fontSize = 12.sp) }, leadingContent = { Cover(artist.tracks.firstOrNull()?.cover.orEmpty(), Modifier.size(48.dp), 24) }, trailingContent = { IconAction(if (artist.profile.starred) R.drawable.ic_favorite else R.drawable.ic_favorites_outlined, if (artist.profile.starred) "取消收藏${artist.name}" else "收藏${artist.name}") { vm.favoriteArtist(artist.profile) } }, modifier = Modifier.clickable { open(MusicList("artist:${artist.id}", artist.name, artist.tracks.map { it.id }, artist.tracks.firstOrNull()?.cover.orEmpty())) })
         }
         }
-    }
+    })
 }
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
@@ -75,8 +75,8 @@ import kotlinx.coroutines.withContext
     BackHandler(currentLocation.isNotEmpty() || returnSearchPath != null) {
         if (currentLocation == returnSearchPath || currentLocation.isBlank() && returnSearchPath != null) returnSearch() else setLocation(folder?.parent.orEmpty())
     }
-    Column(Modifier.fillMaxSize()) {
-        FlowRow(Modifier.fillMaxWidth().padding(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.Center) {
+    AdaptiveBrowserPage(header = {
+        FlowRow(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.Center) {
             FilterChip(!flat, { flat = false }, { Text("层级") }); FilterChip(flat, { flat = true }, { Text("平铺") })
             ChoiceFilter("地区：", region, DirectoryRegions.choices) { region = it }
             if (currentLocation.isNotBlank() && currentLocation != DirectoryRegions.MISSING) IconAction(R.drawable.ic_more_vert, "设置此目录地区") { classify = true }
@@ -92,9 +92,10 @@ import kotlinx.coroutines.withContext
             Text("${filtered.orEmpty().sumOf { it.entries.size }} 个文件夹 · ${allSongs.size} 首歌曲", Modifier.weight(1f), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             TextButton({ vm.start(allSongs, source = "包含子目录：${folder?.name ?: "全部目录"}") }) { Text("包含子目录播放", fontSize = 11.sp) }
         }
+    }, content = {
         scrollStates.SaveableStateProvider("$currentLocation:$flat:$region") {
             val state = rememberLazyListState()
-            if (filtered != null) IndexedBrowser(filtered.orEmpty(), state, { it.path }, Modifier.weight(1f), footer = {
+            if (filtered != null) IndexedBrowser(filtered.orEmpty(), state, { it.path }, Modifier.fillMaxSize(), footer = {
                 item(key = "direct-title") { Text("当前目录歌曲 · ${songs.size} 首", Modifier.padding(horizontal = 24.dp, vertical = 16.dp), fontSize = 13.sp) }
                 if (songs.isNotEmpty()) item(key = "direct-play") { TextButton({ vm.start(songs, source = folder?.name ?: "当前目录") }, Modifier.padding(horizontal = 16.dp)) { Text("播放当前目录") } }
                 items(songs, key = { "song:${it.id}" }) { t -> SongRow(t, action = { vm.start(songs, source = folder?.name ?: "当前目录", index = songs.indexOf(t)) }, more = { menu(t) }) }
@@ -103,7 +104,7 @@ import kotlinx.coroutines.withContext
                 ListItem(headlineContent = { Text(child.name, maxLines = 1, overflow = TextOverflow.Ellipsis) }, supportingContent = { Text((if (flat) "${child.parent.orEmpty()}\n" else "") + "${child.allTracks.count { region == "全部" || ui.index.regions[it] == region }} 首 · ${ui.index.folderRegion(child.path)}", fontSize = 11.sp) }, leadingContent = { AppIcon(R.drawable.ic_folder, "文件夹") }, trailingContent = { Text("›", fontSize = 24.sp) }, modifier = Modifier.semantics { contentDescription = "目录：${child.path}" }.clickable { setLocation(child.path) })
             }
         }
-    }
+    })
     if (classify) AlertDialog(onDismissRequest = { classify = false }, title = { Text("设置此目录地区") }, text = {
         Column(Modifier.verticalScroll(rememberScrollState())) { Text("仅保存在本机，子目录继承；手动歌手分类优先。不会移动或修改 NAS 文件。", fontSize = 12.sp)
             DirectoryRegions.choices.drop(1).forEach { value -> TextButton({ vm.setFolderRegion(currentLocation, value); classify = false }) { Text(value) } }

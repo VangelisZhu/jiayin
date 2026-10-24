@@ -75,7 +75,7 @@ import kotlinx.coroutines.launch
     }
     menu?.let { profile ->
         AlertDialog(onDismissRequest = { menu = null }, title = { Text(profile.name) }, text = {
-            Column {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 TextButton({ menu = null; rename = profile }) { Text("重命名") }
                 if (profile.authenticated) TextButton({ menu = null; vm.testServer(profile) }) { Text("测试连接") }
                 TextButton({ menu = null; editing = profile }) { Text("重新登录") }
@@ -106,7 +106,7 @@ import kotlinx.coroutines.launch
                 Text("认证信息加密保存在本机。不同地址及不同账户分别保存。", fontSize = 12.sp)
             }
         }, confirmButton = { TextButton({ save(true) }, enabled = ready) { Text("保存并切换") } }, dismissButton = {
-            Row { TextButton({ add = false; editing = null }) { Text("取消") }; TextButton({ save(false) }, enabled = ready) { Text("仅保存") } }
+            FlowRow { TextButton({ add = false; editing = null }) { Text("取消") }; TextButton({ save(false) }, enabled = ready) { Text("仅保存") } }
         })
     }
     rename?.let { profile ->

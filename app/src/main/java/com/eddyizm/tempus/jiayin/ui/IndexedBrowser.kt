@@ -63,12 +63,14 @@ import kotlinx.coroutines.launch
             footer()
         }
         if (sections.isNotEmpty()) {
-            val labels = remember { ('A'..'Z').map { it.toString() } + "#" }
-            BoxWithConstraints(Modifier.align(Alignment.CenterEnd).width(44.dp).fillMaxHeight(.95f)) {
+            val allLabels = remember { ('A'..'Z').map { it.toString() } + "#" }
+            BoxWithConstraints(Modifier.align(Alignment.CenterEnd).width(48.dp).fillMaxHeight(.95f)) {
+            val labels = if (maxHeight < 420.dp) allLabels.filter { it in positions } else allLabels
+            TextButton({ selection = true }, Modifier.align(Alignment.TopCenter).sizeIn(minWidth = 48.dp, minHeight = 48.dp), contentPadding = PaddingValues(0.dp)) { Text("字母", fontSize = 10.sp) }
             // Dense A–Z labels must fit their slot even when system text is enlarged.
             // The accessibility letter picker keeps full-sized 48dp targets.
-            val labelSize = with(LocalDensity.current) { (maxHeight / labels.size * .8f).toSp() }.value.coerceAtMost(10f).sp
-            Column(Modifier.fillMaxSize().semantics {
+            val labelSize = with(LocalDensity.current) { ((maxHeight - 48.dp).coerceAtLeast(1.dp) / labels.size.coerceAtLeast(1) * .8f).toSp() }.value.coerceAtMost(10f).sp
+            Column(Modifier.fillMaxSize().padding(top = 48.dp).semantics {
                 contentDescription = "字母快速定位"
                 onClick(label = "打开字母选择器") { selection = true; true }
                 customActions = positions.keys.map { label -> CustomAccessibilityAction("定位到 $label") { latestJump(label); true } }
@@ -99,6 +101,6 @@ import kotlinx.coroutines.launch
         }
     }
     if (selection) AlertDialog(onDismissRequest = { selection = false }, title = { Text("选择字母") }, text = {
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) { positions.keys.forEach { label -> TextButton({ latestJump(label); selection = false }, Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp)) { Text(label) } } }
+        FlowRow(Modifier.verticalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) { positions.keys.forEach { label -> TextButton({ latestJump(label); selection = false }, Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp)) { Text(label) } } }
     }, confirmButton = { TextButton({ selection = false }) { Text("取消") } })
 }

@@ -35,7 +35,7 @@ import kotlinx.coroutines.withContext
         item {
             Row(Modifier.fillMaxWidth().clickable { route("servers") }.padding(24.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(64.dp).background(MaterialTheme.colorScheme.primaryContainer, CircleShape), contentAlignment = Alignment.Center) { Text("家", fontSize = 28.sp, color = MaterialTheme.colorScheme.primary) }
-                Column(Modifier.padding(start = 18.dp)) { Text(vm.repo.profiles.find(vm.repo.account)?.name ?: vm.repo.user, fontSize = 22.sp, fontWeight = FontWeight.SemiBold); Text("我的家庭曲库 · ${ui.library.tracks.size} 首", Modifier.padding(top = 8.dp), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                Column(Modifier.weight(1f).padding(start = 18.dp)) { Text(vm.repo.profiles.find(vm.repo.account)?.name ?: vm.repo.user, fontSize = 22.sp, fontWeight = FontWeight.SemiBold); Text("我的家庭曲库 · ${ui.library.tracks.size} 首", Modifier.padding(top = 8.dp), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             }
         }
         item { SheetActionPadded("我喜欢 · ${ui.library.tracks.count { it.starred }} 首", R.drawable.ic_favorite) { collection(MusicList("favorites", "我喜欢", ui.library.tracks.filter { it.starred }.map { it.id })) } }
@@ -120,9 +120,9 @@ import kotlinx.coroutines.withContext
     var selecting by remember { mutableStateOf(false) }
     var selected by remember { mutableStateOf(emptySet<String>()) }
     LaunchedEffect(ui.downloads.map { it.id }) { selected = selected.intersect(ui.downloads.map { it.id }.toSet()) }
-    Column(Modifier.fillMaxSize()) {
+    AdaptiveBrowserPage(header = {
         PageTitle("下载与离线", "${downloaded.size} 首已下载 · ${ui.downloads.sumOf { it.bytes } / 1024 / 1024} MB", back)
-        Row(Modifier.padding(horizontal = 24.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) { Button({ vm.start(downloaded.mapNotNull { byId[it.trackId] }, source = "已下载") }) { Text("离线播放") }; OutlinedButton({ vm.start(downloaded.mapNotNull { byId[it.trackId] }, true, "下载随机") }) { AppIcon(R.drawable.ic_shuffle, "随机"); Text("随机播放") } }
+        FlowRow(Modifier.padding(horizontal = LocalPhoneLayout.current.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp)) { Button({ vm.start(downloaded.mapNotNull { byId[it.trackId] }, source = "已下载") }) { Text("离线播放") }; OutlinedButton({ vm.start(downloaded.mapNotNull { byId[it.trackId] }, true, "下载随机") }) { AppIcon(R.drawable.ic_shuffle, "随机"); Text("随机播放") } }
         FlowRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
             TextButton({ vm.pauseAllDownloads(true) }, enabled = ui.downloads.any { it.state != Download.STATE_COMPLETED }) { Text("全部暂停") }
             TextButton({ vm.pauseAllDownloads(false) }, enabled = ui.downloads.isNotEmpty()) { Text("全部继续") }
@@ -134,7 +134,8 @@ import kotlinx.coroutines.withContext
             TextButton({ remove = selected.toSet() }, enabled = selected.isNotEmpty()) { Text("删除所选 ${selected.size}") }
             TextButton({ remove = ui.downloads.map { it.id }.toSet() }, enabled = ui.downloads.isNotEmpty()) { Text("删除全部") }
         }
-        LazyColumn(Modifier.weight(1f)) {
+    }, content = {
+        LazyColumn(Modifier.fillMaxSize()) {
         item { Text("默认仅 Wi-Fi 下载。已下载音乐和缓存歌词在无网络时仍可使用。", Modifier.padding(24.dp), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         if (ui.downloads.isEmpty()) item { EmptyState("让音乐陪你离线", "在歌曲菜单或歌单页面点下载。") }
         items(ui.downloads, key = { it.id }) { d ->
@@ -156,6 +157,6 @@ import kotlinx.coroutines.withContext
             }
         }
     }
-    }
+    })
     remove?.let { ids -> AlertDialog(onDismissRequest = { remove = null }, title = { Text("移除 ${ids.size} 首下载？") }, text = { Text("移除手机上的下载，NAS 原文件会保留。") }, confirmButton = { TextButton({ vm.removeDownloads(ids); selected = selected - ids; remove = null }) { Text("移除") } }, dismissButton = { TextButton({ remove = null }) { Text("取消") } }) }
 }

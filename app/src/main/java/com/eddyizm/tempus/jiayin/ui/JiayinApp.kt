@@ -1,4 +1,4 @@
-@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 package com.eddyizm.tempus.jiayin.ui
 
 import androidx.activity.compose.BackHandler
@@ -105,9 +105,9 @@ import kotlinx.coroutines.flow.map
         if (player) player = false else if (searchState.active) vm.hideSearch() else if (route == "detail") backCollection() else route = previousRoute.takeIf { it != "detail" } ?: "home"
     }
     MaterialTheme(colorScheme = colors, typography = Typography()) {
-        Surface(Modifier.fillMaxSize()) {
+        PhoneLayoutProvider { Surface(Modifier.fillMaxSize()) {
             if (ui.preparationError != null) {
-                Column(Modifier.fillMaxSize().safeDrawingPadding().padding(28.dp), verticalArrangement = Arrangement.Center) {
+                Column(Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(28.dp), verticalArrangement = Arrangement.Center) {
                     Text("本地数据准备未完成", style = MaterialTheme.typography.headlineSmall)
                     Text(ui.preparationError.orEmpty(), Modifier.padding(vertical = 18.dp))
                     Text("原下载会保留。请检查手机空间后重试；也可清空临时播放缓存腾出空间，已下载歌曲不会因此删除。", fontSize = 14.sp)
@@ -122,17 +122,20 @@ import kotlinx.coroutines.flow.map
                 Scaffold(modifier = if (player) Modifier.clearAndSetSemantics { } else Modifier,
                     snackbarHost = { SnackbarHost(snack) },
                     bottomBar = {
-                        Column(if (searchState.active) Modifier.imePadding().navigationBarsPadding() else Modifier) {
-                            if (playback.current != null) MiniPlayer(playback, showPlayer, { vm.command("toggle") }, { miniQueue = true }, visible = !player)
-                            if (!searchState.active) NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 0.dp) {
+                        Column(if (searchState.active) Modifier.imePadding().navigationBarsPadding() else Modifier.navigationBarsPadding()) {
+                            val density = androidx.compose.ui.platform.LocalDensity.current
+                            val inputSpace = LocalPhoneLayout.current.height - with(density) { WindowInsets.ime.getBottom(this).toDp() }
+                            val showMini = !searchState.active || !WindowInsets.isImeVisible || inputSpace >= 240.dp
+                            if (playback.current != null && showMini) MiniPlayer(playback, showPlayer, { vm.command("toggle") }, { miniQueue = true }, visible = !player)
+                            if (!searchState.active) NavigationBar(modifier = if (LocalPhoneLayout.current.shortWindow) Modifier.height(56.dp) else Modifier, windowInsets = WindowInsets(0, 0, 0, 0), containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 0.dp) {
                                 listOf(Triple("home", "首页", R.drawable.ic_home), Triple("library", "曲库", R.drawable.ic_albums), Triple("search", "搜索", R.drawable.ic_search), Triple("my", "我的", R.drawable.ic_favorite)).forEach { (id, label, icon) ->
-                                    NavigationBarItem(route == id, { searchReturn = null; route = id }, icon = { AppIcon(icon, label) }, label = { Text(label, fontSize = 12.sp) })
+                                    NavigationBarItem(route == id, { searchReturn = null; route = id }, icon = { AppIcon(icon, label) }, label = if (LocalPhoneLayout.current.shortWindow) null else { { Text(label, fontSize = 12.sp) } })
                                 }
                             }
                         }
                     }
                 ) { padding ->
-                    Box(Modifier.fillMaxSize().padding(padding)) {
+                    Box(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
                         Box(if (searchState.active) Modifier.fillMaxSize().clearAndSetSemantics { } else Modifier.fillMaxSize()) {
                         if (!searchState.active) pageStates.SaveableStateProvider(pageKey(vm.repo.account + ":" + if (route == "detail") "detail:${collection?.id}" else route)) { when (route) {
                             "home" -> HomePage(ui, vm, openCollection, openRoute, showPlayer, { menuTrack = it }, { newPlaylist = true })
@@ -214,6 +217,7 @@ import kotlinx.coroutines.flow.map
         }
     }
 }
+}
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable fun LoginScreen(ui: HomeState, vm: JiayinViewModel) {
@@ -221,7 +225,7 @@ import kotlinx.coroutines.flow.map
     var user by rememberSaveable { mutableStateOf(vm.repo.user) }
     var password by remember { mutableStateOf("") }
     var automaticLyrics by rememberSaveable { mutableStateOf(vm.repo.settings.getBoolean("auto-repair-lyrics", false)) }
-    Column(Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(28.dp), verticalArrangement = Arrangement.Center) {
+    Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding().verticalScroll(rememberScrollState()).padding(28.dp), verticalArrangement = Arrangement.Center) {
         Text("家音", fontSize = 42.sp, fontWeight = FontWeight.Bold, color = HomeGreen)
         Text("让家里的音乐，陪你出门。", Modifier.padding(top = 10.dp, bottom = 40.dp), style = MaterialTheme.typography.titleMedium)
         OutlinedTextField(address, { address = it }, label = { Text("音乐服务器地址") }, placeholder = { Text("https://music.example.com") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
@@ -236,7 +240,7 @@ import kotlinx.coroutines.flow.map
         }
         Text("开启后，仅发现乱码时向 LRCLIB 发送歌名和歌手；正常歌词不会自动匹配。可随时在设置关闭。", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(18.dp))
-        Button({ vm.repo.settings.edit().putBoolean("auto-repair-lyrics", automaticLyrics).apply(); vm.login(address, user, password) }, Modifier.fillMaxWidth().height(54.dp), enabled = !ui.loading && address.isNotBlank() && user.isNotBlank() && password.isNotEmpty()) { Text(if (ui.loading) ui.status else "连接我的音乐") }
+        Button({ vm.repo.settings.edit().putBoolean("auto-repair-lyrics", automaticLyrics).apply(); vm.login(address, user, password) }, Modifier.fillMaxWidth().heightIn(min = 54.dp), enabled = !ui.loading && address.isNotBlank() && user.isNotBlank() && password.isNotEmpty()) { Text(if (ui.loading) ui.status else "连接我的音乐") }
         serverUiError(vm)?.let { Text(it, Modifier.padding(top = 12.dp), color = MaterialTheme.colorScheme.error) }
         ui.message?.let { Text(it, Modifier.padding(top = 18.dp), color = MaterialTheme.colorScheme.error) }
         Text("填写你自己的 Navidrome 或兼容 Subsonic 的音乐服务地址与账户，不要填写 NAS 管理页面地址。认证信息加密保存在本机。家音不提供公共曲库或共享账户。", Modifier.padding(top = 24.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
@@ -289,10 +293,9 @@ import kotlinx.coroutines.flow.map
                 }
             } }
             item {
-                Row(Modifier.padding(horizontal = 24.dp, vertical = 18.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    FilledTonalButton({ vm.discover(); player() }, Modifier.weight(1f).height(52.dp)) { AppIcon(R.drawable.ic_shuffle, "随机"); Spacer(Modifier.width(8.dp)); Text("随便听听") }
-                    OutlinedButton({ collection(MusicList("favorites", "我喜欢", tracks.filter { it.starred }.map { it.id })) }, Modifier.weight(1f).height(52.dp)) { AppIcon(R.drawable.ic_favorite, "喜欢"); Spacer(Modifier.width(8.dp)); Text("我喜欢") }
-                }
+                ActionPair(Modifier.padding(horizontal = LocalPhoneLayout.current.gutter, vertical = 18.dp),
+                    first = { m -> FilledTonalButton({ vm.discover(); player() }, m.heightIn(min = 52.dp)) { AppIcon(R.drawable.ic_shuffle, "随机"); Spacer(Modifier.width(8.dp)); Text("随便听听") } },
+                    second = { m -> OutlinedButton({ collection(MusicList("favorites", "我喜欢", tracks.filter { it.starred }.map { it.id })) }, m.heightIn(min = 52.dp)) { AppIcon(R.drawable.ic_favorite, "喜欢"); Spacer(Modifier.width(8.dp)); Text("我喜欢") } })
             }
             item { SectionTitle("为你挑选", "查看全部") { route("recommend") } }
             item {
