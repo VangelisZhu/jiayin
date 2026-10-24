@@ -38,6 +38,12 @@ local-toolchains/
 *.hprof
 *.log
 .env.*
+!manager/.env.example
+**/__pycache__/
+**/.pytest_cache/
+*.pyc
+/manager/data/
+/manager/demo/
 signing-private.json
 secrets/
 work/

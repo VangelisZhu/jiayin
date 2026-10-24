@@ -65,6 +65,7 @@ import kotlinx.coroutines.flow.map
     var collection by remember { mutableStateOf(vm.selectedCollection) }
     var parentCollection by remember { mutableStateOf<MusicList?>(null) }
     var menuTrack by remember { mutableStateOf<Track?>(null) }
+    var artistTarget by remember { mutableStateOf<Track?>(null) }
     var playlistTarget by remember { mutableStateOf<Track?>(null) }
     var newPlaylist by remember { mutableStateOf(false) }
     var renameList by remember { mutableStateOf<MusicList?>(null) }
@@ -176,7 +177,10 @@ import kotlinx.coroutines.flow.map
                     }
                 }
                 AnimatedVisibility(player, enter = fadeIn(tween(220)) + slideInVertically(tween(220)) { it / 6 }, exit = fadeOut(tween(220)) + slideOutVertically(tween(220)) { it / 6 }) {
-                    FullPlayer(ui, playback, vm, dark, { player = false }, { playlistTarget = it }, { song -> player = false; openCollection(artistCollection(song, ui.library.tracks)) })
+                    FullPlayer(ui, playback, vm, dark, { player = false }, { playlistTarget = it }, { song ->
+                        if (song.performers().size > 1) artistTarget = song
+                        else { player = false; openCollection(artistCollection(song, ui.library.tracks)) }
+                    })
                 }
                 if (player) SnackbarHost(snack, Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(16.dp))
                 if (miniQueue) QueueSheet(ui, playback, vm) { miniQueue = false }
@@ -191,11 +195,19 @@ import kotlinx.coroutines.flow.map
                     SheetAction(R.drawable.ic_playlist_add, "加入播放队列") { vm.command("insert") { putString("track", song.id) }; menuTrack = null }
                     SheetAction(R.drawable.ic_favorite, if (song.starred) "取消喜欢" else "我喜欢") { vm.favorite(song); menuTrack = null }
                     SheetAction(R.drawable.ic_playlist, "加入歌单") { playlistTarget = song; menuTrack = null }
+                    SheetAction(R.drawable.ic_search, "查看演唱者") { artistTarget = song; menuTrack = null }
                     SheetAction(R.drawable.ic_download, "下载到手机") { vm.download(listOf(song)); menuTrack = null }
                     SheetAction(R.drawable.ic_refresh, "从这首继续听") { vm.recommendations(song); route = "recommend"; menuTrack = null }
                     SheetAction(R.drawable.ic_close, "不喜欢，不再推荐") { vm.dislike(song); menuTrack = null }
                 }
             }
+        }
+        artistTarget?.let { song ->
+            AlertDialog(onDismissRequest = { artistTarget = null }, title = { Text("演唱者") }, text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    song.performers().forEach { artist -> TextButton({ artistTarget = null; player = false; openCollection(artistCollection(artist, ui.library.tracks, song.cover)) }) { Text(artist.name) } }
+                }
+            }, confirmButton = { TextButton({ artistTarget = null }) { Text("返回") } })
         }
         playlistTarget?.let { song ->
             AlertDialog(onDismissRequest = { playlistTarget = null }, title = { Text("加入歌单") }, text = {

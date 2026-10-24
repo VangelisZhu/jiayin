@@ -1,0 +1,2 @@
+manager/entrypoint.sh text eol=lf
+manager/Dockerfile text eol=lf

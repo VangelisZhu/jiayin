@@ -14,6 +14,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.eddyizm.tempus.jiayin.core.*
 import com.eddyizm.tempus.jiayin.data.JiayinRepository
+import com.eddyizm.tempus.jiayin.data.ServerProfile
 import com.eddyizm.tempus.jiayin.playback.*
 import kotlinx.coroutines.runBlocking
 import org.junit.Test
@@ -34,6 +35,8 @@ class UiFixtureScreenshotsTest {
         val account = "ui-fixture-only"
         repo.settings.edit().putString("account", account).putString("server", "https://127.0.0.1:9").putString("user", "家里的音乐").commit()
         repo.vault.put("$account.token", "fixture-not-a-credential"); repo.vault.put("$account.salt", "fixture")
+        val profile = ServerProfile(account, "生成视觉曲库", "https://127.0.0.1:9", "家里的音乐")
+        repo.profiles.upsert(profile); repo.profiles.activate(profile, offline = true)
         val cold = cover("coast", false)
         val warm = cover("sunset", true)
         val tracks = listOf(
@@ -228,7 +231,12 @@ class UiFixtureScreenshotsTest {
         paint.color = if (warm) 0xFF384D48.toInt() else 0xFF274E5A.toInt()
         canvas.drawPath(Path().apply { moveTo(0f, 355f); cubicTo(200f, 320f, 180f, 460f, 512f, 350f); lineTo(512f, 512f); lineTo(0f, 512f); close() }, paint)
         file.outputStream().use { image.compress(Bitmap.CompressFormat.PNG, 100, it) }; image.recycle()
-        return "ir_" + Base64.encodeToString(UriString(file).toByteArray(), Base64.URL_SAFE or Base64.NO_WRAP)
+        val id = "ir_" + Base64.encodeToString(UriString(file).toByteArray(), Base64.URL_SAFE or Base64.NO_WRAP)
+        // The account artwork loader intentionally accepts cached bytes / HTTP, never file URLs.
+        // Seed the real account cache so this offline visual fixture exercises production rendering.
+        val cached = File(context.filesDir, "account-covers/${JiayinRepository.get(context).account}/${digest(id)}.png")
+        cached.parentFile?.mkdirs(); file.copyTo(cached, overwrite = true)
+        return id
     }
     private fun UriString(file: File) = android.net.Uri.fromFile(file).toString()
 }

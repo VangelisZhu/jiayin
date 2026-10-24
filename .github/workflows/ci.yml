@@ -1,4 +1,4 @@
-name: Android checks
+name: Android and library manager checks
 
 on:
   push:
@@ -10,6 +10,33 @@ permissions:
   contents: read
 
 jobs:
+  manager:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: manager/requirements*.txt
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          pip install -r manager/requirements-dev.txt
+      - name: Test generated library and browser syntax
+        run: |
+          python -m pytest manager/tests -q --junitxml=manager-results.xml
+          node --check manager/jiayin_manager/static/app.js
+      - name: Build NAS container
+        run: docker build -t jiayin-manager:ci manager
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: manager-test-results
+          path: manager-results.xml
   android:
     runs-on: ubuntu-latest
     steps:

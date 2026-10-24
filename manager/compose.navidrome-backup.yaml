@@ -1,0 +1,6 @@
+services:
+  manager:
+    environment:
+      JIAYIN_NAVIDROME_DB: /navidrome/navidrome.db
+    volumes:
+      - "${NAVIDROME_DATA_PATH:?Set the existing Navidrome data directory}:/navidrome:ro"

@@ -162,7 +162,13 @@ class JiayinRepository(val context: Context, private val fixedSession: AccountSe
                 }
             }
         }
-        Library(songs.values.map { it.copy(starred = favorites[it.id] ?: it.starred) }, mergedLists, System.currentTimeMillis()).also { saveLibrary(it) }
+        val enhanced = runCatching { ManagerMetadata(this@JiayinRepository).load(songs.values.toList()) }.getOrElse {
+            check(currentSession()) { "账户已切换" }
+            progress("曲库管理暂不可用，保留上次分类")
+            val previous = local.tracks.associateBy { it.id }
+            songs.values.map { t -> t.copy(sharedRegion = previous[t.id]?.sharedRegion, albumVersion = t.albumVersion?.takeIf(String::isNotBlank) ?: previous[t.id]?.albumVersion) }
+        }
+        Library(enhanced.map { it.copy(starred = favorites[it.id] ?: it.starred) }, mergedLists, System.currentTimeMillis()).also { saveLibrary(it) }
     } }
     @Synchronized fun favorite(track: Track) {
         val lib = library(); saveLibrary(lib.copy(tracks = lib.tracks.map { if (it.id == track.id) it.copy(starred = !track.starred) else it }))
@@ -239,7 +245,11 @@ class JiayinRepository(val context: Context, private val fixedSession: AccountSe
         @Volatile private var instance: JiayinRepository? = null
         fun get(context: Context): JiayinRepository = instance ?: synchronized(this) { instance ?: JiayinRepository(context.applicationContext).also { instance = it } }
         fun one(key: String, value: String) = mapOf(key to listOf(value))
-        fun parseTrack(o: JsonObject): Track = Track(o.str("id"), o.str("title"), o.str("artist").ifBlank { "未知歌手" }, o.str("album"), o.str("albumId"), o.str("artistId"), o.str("coverArt"), o.num("duration"), o.str("genre"), runCatching { java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US).apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }.parse(o.str("created"))?.time ?: 0 }.getOrDefault(0), isStarred(o), o.str("path"), o.num("track"), o.num("discNumber"), parseReleaseDate(o))
+        fun parseTrack(o: JsonObject): Track = Track(o.str("id"), o.str("title"), o.str("displayArtist").ifBlank { o.str("artist") }.ifBlank { "未知歌手" }, o.str("album"), o.str("albumId"), o.str("artistId"), o.str("coverArt"), o.num("duration"), o.str("genre"), runCatching { java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US).apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }.parse(o.str("created"))?.time ?: 0 }.getOrDefault(0), isStarred(o), o.str("path"), o.num("track"), o.num("discNumber"), parseReleaseDate(o),
+            artists = o.objects("artists").map { ArtistRef(it.str("id"), it.str("name")) }.takeIf { it.isNotEmpty() },
+            albumArtists = o.objects("albumArtists").map { ArtistRef(it.str("id"), it.str("name")) }.takeIf { it.isNotEmpty() },
+            genres = o.objects("genres").map { it.str("name") }.takeIf { it.isNotEmpty() }, recordingId = o.str("musicBrainzId").takeIf { it.isNotBlank() },
+            albumVersion = o.str("albumVersion").takeIf { it.isNotBlank() }, language = o.str("language").takeIf { it.isNotBlank() }, compilation = o.get("isCompilation")?.asBoolean ?: false)
         fun isStarred(o: JsonObject): Boolean {
             val value = o.get("starred")?.takeIf { it.isJsonPrimitive }?.asJsonPrimitive ?: return false
             return if (value.isBoolean) value.asBoolean else value.asString.isNotBlank()

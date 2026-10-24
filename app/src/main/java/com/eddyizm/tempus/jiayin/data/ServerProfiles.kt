@@ -59,7 +59,7 @@ class ServerProfiles(context: Context) : ProfileRegistry {
         CredentialBridge.invalidate()
     }
     @Synchronized override fun logout(id: String) {
-        vault.remove("$id.token"); vault.remove("$id.salt")
+        vault.remove("$id.token"); vault.remove("$id.salt"); vault.remove("$id.manager-read")
         find(id)?.let { upsert(it.copy(authenticated = false)) }; CredentialBridge.invalidate()
     }
     @Synchronized override fun remove(id: String) { logout(id); vault.remove("$id.deepl"); save(all().filterNot { it.id == id }) }

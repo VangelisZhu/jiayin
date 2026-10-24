@@ -125,7 +125,7 @@ import kotlinx.coroutines.delay
         FilterChips(listOf("曲风", "歌手"), category) { category = it }
         if (category == "歌手") ArtistBrowser(ui, vm, collection, search)
         else {
-            val genres = remember(ui.library.tracks) { ui.library.tracks.groupBy { it.genre.ifBlank { "未分类" } }.toSortedMap() }
+            val genres = remember(ui.library.tracks) { ui.library.tracks.flatMap { t -> t.genreNames().ifEmpty { listOf("未分类") }.map { it to t } }.groupBy({ it.first }, { it.second }).toSortedMap() }
             LazyVerticalGrid(GridCells.Adaptive(140.dp), Modifier.weight(1f), contentPadding = PaddingValues(24.dp), horizontalArrangement = Arrangement.spacedBy(14.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 item(span = { GridItemSpan(maxLineSpan) }) { Text("来自你的曲库", style = MaterialTheme.typography.titleMedium) }
                 items(genres.entries.toList(), key = { it.key }) { (name, tracks) ->

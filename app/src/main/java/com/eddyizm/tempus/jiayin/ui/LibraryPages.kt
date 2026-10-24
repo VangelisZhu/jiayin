@@ -33,6 +33,7 @@ import sh.calvin.reorderable.*
     val scopedRepo = vm.repo
     var category by rememberSaveable { mutableStateOf(scopedRepo.settings.getString("${scopedRepo.account}.browse-library-category", "专辑") ?: "专辑") }
     var sort by rememberSaveable { mutableStateOf("名称") }
+    var foldRecordings by rememberSaveable { mutableStateOf(false) }
     var folder by rememberSaveable { mutableStateOf(scopedRepo.settings.getString("${scopedRepo.account}.browse-folder", "").orEmpty()) }
     val request by vm.folderRequest.collectAsState()
     var requestSeen by rememberSaveable { mutableLongStateOf(0L) }
@@ -62,24 +63,31 @@ import sh.calvin.reorderable.*
             "文件夹" -> FolderBrowser(ui, vm, menu, search, folder, { folder = it }, returnSearchPath, returnSearch, { contextualScope = it })
             "歌曲" -> {
                 val scroll = rememberLazyListState()
+                val groups = remember(sorted) { recordingGroups(sorted) }
+                val displayed = remember(sorted, foldRecordings) { if (foldRecordings) groups.map { it.first() } else sorted }
+                val versions = remember(groups) { groups.filter { it.size > 1 }.associateBy { it.first().id } }
                 LazyColumn(state = scroll) {
                     item { FlowRow(Modifier.padding(horizontal = 24.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Button({ vm.start(sorted, source = "全部歌曲") }) { AppIcon(R.drawable.ic_play, "播放"); Text("播放全部") }
-                        OutlinedButton({ vm.start(sorted, true, "全库随机") }) { AppIcon(R.drawable.ic_shuffle, "随机"); Text("随机播放") }
+                        Button({ vm.start(displayed, source = "全部歌曲") }) { AppIcon(R.drawable.ic_play, "播放"); Text("播放全部") }
+                        OutlinedButton({ vm.start(displayed, true, "全库随机") }) { AppIcon(R.drawable.ic_shuffle, "随机"); Text("随机播放") }
+                        TextButton({ foldRecordings = !foldRecordings }) { Text(if (foldRecordings) "显示全部收录" else "折叠同录音收录") }
                     } }
-                    items(sorted, key = { it.id }) { t -> SongRow(t, action = { vm.start(sorted, source = "全部歌曲", index = sorted.indexOf(t)) }, more = { menu(t) }) }
+                    items(displayed, key = { it.id }) { t -> Column {
+                        SongRow(t, action = { vm.start(displayed, source = "全部歌曲", index = displayed.indexOf(t)) }, more = { menu(t) })
+                        if (foldRecordings) versions[t.id]?.let { group -> TextButton({ collection(MusicList("versions:${t.id}", "${t.title} · 不同专辑收录", group.map { it.id }, t.cover)) }, Modifier.padding(start = 72.dp)) { Text("${group.size} 个收录版本") } }
+                    } }
                 }
             }
             "专辑" -> {
-                val albums = remember(sorted) { sorted.groupBy { it.albumId.ifBlank { "${it.album}:${artistKey(it)}" } }.values.toList() }
+                val albums = remember(sorted) { sorted.groupBy(::albumKey).values.toList() }
                 val scroll = rememberLazyGridState()
                 LazyVerticalGrid(GridCells.Adaptive(LocalPhoneLayout.current.albumMinimum), state = scroll, contentPadding = PaddingValues(LocalPhoneLayout.current.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(24.dp)) {
-                    items(albums, key = { it.first().albumId.ifBlank { "${it.first().album}:${artistKey(it.first())}" } }) { album ->
+                    items(albums, key = { albumKey(it.first()) }) { album ->
                         val t = album.first(); val ordered = album.sortedWith(compareBy<Track> { it.disc }.thenBy { it.number })
-                        Column(Modifier.clickable { collection(MusicList("album:${t.albumId.ifBlank { artistKey(t) + t.album }}", t.album.ifBlank { "未命名专辑" }, ordered.map { it.id }, t.cover)) }) {
+                        Column(Modifier.clickable { collection(MusicList("album:${albumKey(t)}", t.album.ifBlank { "未命名专辑" }, ordered.map { it.id }, t.cover)) }) {
                             Cover(t.cover, Modifier.fillMaxWidth().aspectRatio(1f), 16)
                             Text(t.album.ifBlank { "未命名专辑" }, Modifier.padding(top = 10.dp), maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 14.sp)
-                            Text(t.artist, Modifier.padding(top = 5.dp), maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(t.albumCredits().joinToString(" / ") { it.name } + t.albumVersion?.takeIf(String::isNotBlank)?.let { " · $it" }.orEmpty(), Modifier.padding(top = 5.dp), maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                 }

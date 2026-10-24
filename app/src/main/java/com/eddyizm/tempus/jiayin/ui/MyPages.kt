@@ -41,7 +41,7 @@ import kotlinx.coroutines.withContext
         item { SheetActionPadded("我喜欢 · ${ui.library.tracks.count { it.starred }} 首", R.drawable.ic_favorite) { collection(MusicList("favorites", "我喜欢", ui.library.tracks.filter { it.starred }.map { it.id })) } }
         item { SectionTitle("收藏的歌手") }
         items(ui.artists.values.filter { it.starred }.sortedBy { it.name }, key = { it.id }) { p ->
-            val tracks = ui.library.tracks.filter { artistKey(it) == p.id }
+            val tracks = ui.library.tracks.filter { p.id in it.artistKeys() }
             ListItem(headlineContent = { Text(p.name) }, supportingContent = { Text("${tracks.size} 首") }, modifier = Modifier.clickable { collection(MusicList("artist:${p.id}", p.name, tracks.map { it.id }, tracks.firstOrNull()?.cover.orEmpty())) })
         }
         item { SheetActionPadded("最近听过", R.drawable.ic_timer) { route("history") } }
@@ -65,12 +65,17 @@ import kotlinx.coroutines.withContext
     var showBitrate by remember { mutableStateOf(false) }
     var clear by remember { mutableStateOf(false) }
     var retryUncertain by remember { mutableStateOf(false) }
+    var manager by remember { mutableStateOf(false) }
+    var managerUrl by remember { mutableStateOf(p.getString("${settingsRepo.account}.manager-url", "").orEmpty()) }
+    var managerToken by remember { mutableStateOf("") }
+    var managerBusy by remember { mutableStateOf(false) }
     var cacheSize by remember { mutableLongStateOf(0L) }
     val playback by PlaybackHub.state.collectAsState()
     LaunchedEffect(Unit) { withContext(Dispatchers.IO) { storedKey = !settingsRepo.vault.get("${settingsRepo.account}.deepl").isNullOrBlank(); cacheSize = DownloadUtil.getStreamingCacheSize(context) } }
     LazyColumn {
         item { PageTitle("设置", back = back) }
         item { ListItem(headlineContent = { Text("音乐服务器 · 切换与退出") }, supportingContent = { Text("${settingsRepo.profiles.find(settingsRepo.account)?.name.orEmpty()} · ${settingsRepo.user}\n${ui.connection}", fontSize = 12.sp) }, modifier = Modifier.clickable(onClick = servers)) }
+        item { ListItem(headlineContent = { Text("NAS 曲库管理 · 共享分类") }, supportingContent = { Text(if (managerUrl.isBlank()) "可选连接；普通 OpenSubsonic 播放不需要" else "已配置 · 只读取当前账户的已核对分类") }, modifier = Modifier.clickable { manager = true }) }
         item { SectionTitle("播放与恢复") }
         item { SettingToggle("被视频打断后自动恢复", "默认关闭。仅恢复被声音打断的音乐，不覆盖主动暂停或耳机断开。", "auto-resume", false, vm) }
         item { SettingToggle("队列结束后推荐续播", "从现有曲库继续挑选；与循环播放独立。", "recommend-autoplay", false, vm) }
@@ -102,6 +107,24 @@ import kotlinx.coroutines.withContext
         item { TextButton({ clear = true }, Modifier.padding(horizontal = 18.dp)) { Text("清空收听记录与推荐偏好") } }
         item { Text("开源许可：GPL-3.0。家音基于 Tempus v4.30.0；完整源码和第三方许可随安装包提供。", Modifier.padding(24.dp), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
     }
+    if (manager) AlertDialog(onDismissRequest = { if (!managerBusy) manager = false }, title = { Text("连接 NAS 曲库管理") }, text = {
+        Column(Modifier.verticalScroll(rememberScrollState())) {
+            Text("在网页后台生成只读连接码。后台绑定的音乐服务器地址和账户必须与当前账户一致。密钥按账户加密保存，退出账户后需重新配置。", fontSize = 12.sp)
+            OutlinedTextField(managerUrl, { managerUrl = it }, label = { Text("后台地址") }, placeholder = { Text("https://manager.example.com") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(managerToken, { managerToken = it }, label = { Text("只读连接码，留空使用已保存的码") }, visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth())
+            TextButton({ p.edit().remove("${settingsRepo.account}.manager-url").apply(); settingsRepo.vault.remove("${settingsRepo.account}.manager-read"); managerUrl = ""; managerToken = ""; manager = false; vm.message("已断开，下次同步恢复音乐服务器信息") }, enabled = !managerBusy) { Text("断开曲库管理") }
+        }
+    }, confirmButton = { TextButton({ managerBusy = true; scope.launch {
+        try {
+            val address = managerUrl.trim().trimEnd('/')
+            val token = managerToken.trim().ifBlank { settingsRepo.vault.get("${settingsRepo.account}.manager-read").orEmpty() }
+            require(address.isNotBlank() && token.isNotBlank()) { "请填写后台地址和只读连接码" }
+            withContext(Dispatchers.IO) { com.eddyizm.tempus.jiayin.data.ManagerMetadata(settingsRepo).load(emptyList(), address, token) }
+            check(settingsRepo.currentSession()) { "账户已切换" }
+            p.edit().putString("${settingsRepo.account}.manager-url", address).apply(); settingsRepo.vault.put("${settingsRepo.account}.manager-read", token)
+            managerUrl = address; managerToken = ""; manager = false; vm.message("连接成功，正在同步共享分类"); vm.sync()
+        } catch (e: Exception) { vm.message(e.message ?: "连接失败") } finally { managerBusy = false }
+    } }, enabled = !managerBusy) { Text(if (managerBusy) "验证中" else "验证并保存") } }, dismissButton = { TextButton({ manager = false }, enabled = !managerBusy) { Text("取消") } })
     if (retryUncertain) AlertDialog(onDismissRequest = { retryUncertain = false }, title = { Text("核对新建歌单") }, text = { Text("此前的新建歌单请求结果未确认。先同步曲库，家音会核对并找回已创建的歌单。请在服务器确认这些歌单不存在后，再重新提交，避免重复创建。") }, confirmButton = { TextButton({ retryUncertain = false; vm.retryUncertainPlaylists() }) { Text("确认不存在，重新提交") } }, dismissButton = { TextButton({ retryUncertain = false; vm.sync() }) { Text("先同步核对") } })
     if (showTheme) AlertDialog(onDismissRequest = { showTheme = false }, title = { Text("主题") }, text = { Column { listOf("system" to "跟随系统", "light" to "浅色", "dark" to "深色").forEach { (id, title) -> TextButton({ p.edit().putString("theme", id).apply(); setTheme(id); showTheme = false }) { Text(title) } } } }, confirmButton = { TextButton({ showTheme = false }) { Text("返回") } })
     if (showBitrate) AlertDialog(onDismissRequest = { showBitrate = false }, title = { Text("移动网络音质") }, text = { Column { listOf(128, 192, 256, 320).forEach { value -> TextButton({ App.getInstance().preferences.edit().putString("max_bitrate_mobile", value.toString()).apply(); showBitrate = false; vm.message("音质将在下一次起播时生效") }) { Text("$value kbps") } } } }, confirmButton = { TextButton({ showBitrate = false }) { Text("返回") } })

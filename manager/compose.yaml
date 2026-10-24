@@ -1,0 +1,18 @@
+services:
+  manager:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${BIND_IP:-127.0.0.1}:8780:8780"
+    environment:
+      JIAYIN_MUSIC_ROOT: /music
+      JIAYIN_DATA_ROOT: /data
+      JIAYIN_ADMIN_PASSWORD: ${JIAYIN_ADMIN_PASSWORD:?Set a unique initial admin password in .env}
+      JIAYIN_PUBLIC_ORIGIN: ${JIAYIN_PUBLIC_ORIGIN:-}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    volumes:
+      - "${MUSIC_PATH:?Set your actual NAS music path}:/music"
+      - "${DATA_PATH:?Set a separate manager data path}:/data"
+    security_opt:
+      - no-new-privileges:true

@@ -1,6 +1,8 @@
 # 开发与构建
 
-当前版本：`1.0.0-preview.8` / `10008`。发布包名为 `org.homemusic.player`，调试包增加 `.debug` 后缀。沿用同一签名的更新可覆盖安装，卸载会删除应用私有数据。
+当前版本：`1.0.0-preview.10` / `10010`。发布包名为 `org.homemusic.player`，调试包增加 `.debug` 后缀。沿用同一签名的更新可覆盖安装，卸载会删除应用私有数据。
+
+可选 Python NAS 后台的构建、部署和测试见 [manager/README.md](manager/README.md)。后台数据、凭据和真实曲库不进入仓库或发布源码包。
 
 ## 环境
 

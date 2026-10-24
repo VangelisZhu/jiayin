@@ -26,7 +26,8 @@ import com.eddyizm.tempus.jiayin.core.*
     val byId = remember(ui.library.tracks) { ui.library.tracks.associateBy { it.id } }
     val tracks = list.tracks.mapNotNull { byId[it] }
     val first = tracks.firstOrNull()
-    val profile = first?.let { vm.artistProfile(it) } ?: ui.artists[list.id.removePrefix("artist:")] ?: ArtistProfile(list.id.removePrefix("artist:"), list.name)
+    val artistId = list.id.removePrefix("artist:")
+    val profile = ui.artists[artistId] ?: ArtistProfile(artistId, list.name)
     val resolvedRegion = ui.index.artists.firstOrNull { it.id == profile.id }?.region ?: profile.region
     var category by rememberSaveable(list.id) { mutableStateOf("歌曲") }
     var sortingName by remember { mutableStateOf(false) }
@@ -45,7 +46,7 @@ import com.eddyizm.tempus.jiayin.core.*
             TextButton({ sortingName = true }) { Text("设置排序名") }
             TextButton({ vm.start(ordered, true, list.name) }) { Text("随机播放") }
         }
-        FilterChips(listOf("歌曲", "专辑"), category) { category = it }
+        FilterChips(listOf("歌曲", "本人专辑", "参与作品"), category) { category = it }
     }, content = {
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
             if (category == "歌曲") {
@@ -58,10 +59,12 @@ import com.eddyizm.tempus.jiayin.core.*
                 }
                 itemsIndexed(ordered, key = { _, t -> t.id }) { i, t -> SongRow(t, i, action = { vm.start(ordered, source = list.name, index = i) }, more = { menu(t) }) }
             } else {
-                val albums = tracks.filter { it.album.contains(query, true) }.groupBy { it.albumId.ifBlank { it.album } }.values.sortedByDescending { songs -> songs.maxOf { it.releaseDate } }
-                items(albums, key = { it.first().albumId.ifBlank { it.first().album } }) { songs ->
+                val albumIds = tracks.filter { t -> t.album.contains(query, true) &&
+                    ((category == "本人专辑") == t.albumCredits().any { it.key == artistId }) }.map(::albumKey).toSet()
+                val albums = ui.library.tracks.filter { albumKey(it) in albumIds }.groupBy(::albumKey).values.sortedByDescending { songs -> songs.maxOf { it.releaseDate } }
+                items(albums, key = { albumKey(it.first()) }) { songs ->
                     val t = songs.first()
-                    ListItem(headlineContent = { Text(t.album.ifBlank { "未命名专辑" }) }, supportingContent = { Text("${songs.size} 首" + if (t.releaseDate > 0) " · ${t.releaseDate / 10000}" else " · 发行日期未知") }, leadingContent = { Cover(t.cover, Modifier.size(64.dp), 12) }, modifier = Modifier.clickable { collection(MusicList("album:${t.albumId}", t.album, songs.sortedWith(compareBy<Track> { it.disc }.thenBy { it.number }).map { it.id }, t.cover)) })
+                    ListItem(headlineContent = { Text(t.album.ifBlank { "未命名专辑" }) }, supportingContent = { Text("${songs.size} 首 · ${t.albumCredits().joinToString(" / ") { it.name }}" + if (t.releaseDate > 0) " · ${t.releaseDate / 10000}" else " · 发行日期未知") }, leadingContent = { Cover(t.cover, Modifier.size(64.dp), 12) }, modifier = Modifier.clickable { collection(MusicList("album:${albumKey(t)}", t.album, songs.sortedWith(compareBy<Track> { it.disc }.thenBy { it.number }).map { it.id }, t.cover)) })
                 }
             }
         }
@@ -74,7 +77,7 @@ import com.eddyizm.tempus.jiayin.core.*
         var region by remember(profile.id) { mutableStateOf(profile.region) }
         var type by remember(profile.id) { mutableStateOf(profile.type) }
         AlertDialog(onDismissRequest = { classification = false }, title = { Text("歌手分类") }, text = {
-            Column(Modifier.verticalScroll(rememberScrollState())) { Text("分类仅保存在本机，按账户隔离。不修改 NAS。未手动设置时使用一致的目录标签，当前地区：$resolvedRegion。", fontSize = 12.sp)
+            Column(Modifier.verticalScroll(rememberScrollState())) { Text("个人分类按账户保存在本机。选择未分类可恢复服务器／目录分类，当前生效地区：$resolvedRegion。", fontSize = 12.sp)
                 Text("地区", Modifier.padding(top = 16.dp)); FilterChips(listOf("华语", "欧美", "日本", "韩国", "其他", "未分类"), region) { region = it }
                 Text("类型", Modifier.padding(top = 16.dp)); FilterChips(listOf("男", "女", "乐队/组合", "未分类"), type) { type = it }
             }

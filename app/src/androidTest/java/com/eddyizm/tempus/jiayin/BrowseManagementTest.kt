@@ -58,7 +58,7 @@ class BrowseManagementTest {
                 click("收藏歌手")
                 await("artist favorite synchronized") { server.starCalls.get() > 0 && vm.state.value.artists[artistKey(song)]?.starred == true }
                 click("搜索歌手作品"); node("搜索关键词"); click("取消")
-                click("专辑"); shot("11-artist-albums")
+                click("本人专辑"); shot("11-artist-albums")
                 click("设置歌手分类"); click("日本"); click("乐队/组合"); click("保存")
                 await("classification") { vm.state.value.artists[artistKey(song)]?.region == "日本" }
                 repo.synchronize(); vm.refreshLocal()
