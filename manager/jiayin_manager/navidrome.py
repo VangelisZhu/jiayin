@@ -73,6 +73,7 @@ class Navidrome:
 
     def capture(self):
         songs = self.catalog()
+        physical = self.physical_paths(songs)
         by_path = {}
         for song in songs:
             path = song.get("path", "").replace("\\", "/").lstrip("/")
@@ -81,7 +82,9 @@ class Navidrome:
         for row in self.store.all("track"):
             if row.get("missing"):
                 continue
-            candidates = by_path.get(row["path"], [])
+            candidates = physical.get(row["path"], []) if physical is not None else by_path.get(row["path"], [])
+            if physical is not None:
+                candidates = [s for s in candidates if s.get("size") == row["size"]]
             if not candidates and row.get("server_id"):
                 candidates = [s for s in songs if s["id"] == row["server_id"]]
             # Paths may be virtual. Do not infer identity from title/artist alone.
@@ -100,6 +103,35 @@ class Navidrome:
             playlists[p["id"]] = {"name": p.get("name", ""), "ids": [s["id"] for s in detail.get("entry", [])]}
         self.store.put("server-state", "latest", {"at": stamp(), "songs": {s["id"]: {"starred": bool(s.get("starred")), "play_count": s.get("playCount", 0)} for s in songs}, "playlists": playlists})
         return {"count": len(songs), "mapped": mapped, "unmapped": sum(not r.get("missing") and not r.get("server_id") for r in self.store.all("track"))}
+
+    def physical_paths(self, songs):
+        """Read actual paths from the explicitly mounted DB; API paths may be virtual.
+
+        Only IDs visible to this connected API account, with matching size and
+        duration in both sources, may be considered. Never join on song names.
+        """
+        configured = os.getenv("JIAYIN_NAVIDROME_DB", "")
+        if not configured:
+            return None
+        if not Path(configured).is_file():
+            raise ValueError("只读 Navidrome 数据库挂载不存在，无法核对实际路径")
+        visible = {s["id"]: s for s in songs}
+        result = {}
+        try:
+            with sqlite3.connect(Path(configured).resolve().as_uri() + "?mode=ro", uri=True, timeout=30) as db:
+                for server_id, path, duration, size in db.execute("SELECT id,path,duration,size FROM media_file"):
+                    song = visible.get(server_id)
+                    if not song or song.get("size") != size or abs(song.get("duration", 0) - duration) > 3:
+                        continue
+                    # Only music-root-relative paths are accepted. Absolute paths
+                    # require an explicit root mapping rather than prefix guessing.
+                    path = str(path).replace("\\", "/")
+                    if path.startswith("/") or any(p in {"", ".", ".."} or ":" in p for p in path.split("/")):
+                        continue
+                    result.setdefault(path, []).append(song)
+        except sqlite3.Error:
+            raise ValueError("无法读取 Navidrome 实际路径；请检查只读数据库挂载与版本") from None
+        return result
 
     def backup_database(self, job_id):
         configured = os.getenv("JIAYIN_NAVIDROME_DB", "")
@@ -141,6 +173,10 @@ class Navidrome:
         by_id = {s["id"]: s for s in songs}
         results = []
         job = self.store.get("job", job_id) if job_id else None
+        if job and job["status"] not in {"awaiting_scan", "verified"}:
+            raise ValueError("请先完成文件任务，再进行服务器核对")
+        job_changes = [self.store.get("change", i) for i in job["ids"]] if job else []
+        before_job = self.store.get("server-before-job", job_id, {}) if job else {}
         baseline = self.store.get("server-state-job", job_id) if job_id else None
         baseline = baseline or self.store.get("server-state", "latest", {})
         playlist_ok = True
@@ -161,12 +197,21 @@ class Navidrome:
                 ok = {g["name"] for g in song.get("genres", [])} == set(m["genres"])
             if ok and song.get("albumArtists"):
                 ok = {a["name"] for a in song["albumArtists"]} == set(m["album_artists"])
+            metadata_ok = ok
+            lyric_only = job_changes and all(c["kind"] == "lyrics" for c in job_changes if c["file_id"] == row["id"])
+            if lyric_only:
+                # A lyric encoding conversion must preserve the original server
+                # tags. Existing tag discrepancies (e.g. inferred album artist)
+                # are independent and must not masquerade as a lyric failure.
+                previous_song = before_job.get(row["id"]) or self.store.get("server-before", row["id"])
+                fields = ("id", "title", "album", "artist", "duration", "artists", "albumArtists", "genres", "genre")
+                ok = bool(song and previous_song and all(song.get(k) == previous_song.get(k) for k in fields))
             if ok:
                 previous = baseline.get("songs", {}).get(song["id"])
                 ok = playlist_ok and (previous is None or previous["starred"] == bool(song.get("starred")) and song.get("playCount", 0) >= previous["play_count"])
-            row["scan_verified"] = ok
+            row["scan_verified"] = bool(ok and metadata_ok)
             self.store.put("track", row["id"], row)
-            results.append({"file_id": row["id"], "ok": ok, "detail": "身份与字段已核对" if ok else "ID 或标签未对应，保留待核对；不会按同名自动迁移"})
+            results.append({"file_id": row["id"], "ok": ok, "detail": ("歌词任务：原服务器 ID 与标签保持一致" if lyric_only else "身份与字段已核对") if ok else "ID 或标签未对应，保留待核对；不会按同名自动迁移"})
             if ok:
                 self.store.put("identity", row["id"], {"file_id": row["id"], "server_id": song["id"], "hash": row["hash"], "at": stamp()})
         if job and results and all(r["ok"] for r in results):

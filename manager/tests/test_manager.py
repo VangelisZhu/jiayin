@@ -284,6 +284,40 @@ def test_ai_secret_never_returned(env):
     assert client.put("/api/ai/config", json={"endpoint": "http://model.example/v1"}).status_code == 409
 
 
+def test_metadata_transient_retry_then_cache(env, monkeypatch):
+    app, _, _ = env
+    waits = []
+    monkeypatch.setattr("jiayin_manager.providers.time.sleep", waits.append)
+    requests = []
+    def respond(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(503)
+        if len(requests) == 2:
+            return httpx.Response(429, headers={"Retry-After": "9999"})
+        return httpx.Response(200, json={"recordings": []})
+    provider = MetadataProvider(app.state.store, httpx.MockTransport(respond))
+    assert provider.get("recording", {"query": "generated"}) == {"recordings": []}
+    assert len(requests) == 3 and 5 in waits and 30 in waits
+    assert provider.get("recording", {"query": "generated"}) == {"recordings": []}
+    assert len(requests) == 3
+
+
+@pytest.mark.parametrize("status,attempts", [(400, 1), (503, 3)])
+def test_metadata_retry_is_bounded_and_failures_not_cached(env, monkeypatch, status, attempts):
+    app, _, _ = env
+    monkeypatch.setattr("jiayin_manager.providers.time.sleep", lambda _: None)
+    calls = []
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(status, json={"error": "generated upstream error"})
+    provider = MetadataProvider(app.state.store, httpx.MockTransport(respond))
+    with pytest.raises(ValueError, match=f"HTTP {status}"):
+        provider.get("recording")
+    assert len(calls) == attempts
+    assert app.state.store.all("metadata-cache") == []
+
+
 def evidence(row):
     return {"file_id": row["id"], "id": "mb:real", "duration": row["duration"], "values": {"title": "Verified", "album": "Release"}, "source": "MusicBrainz"}
 
@@ -331,6 +365,65 @@ def test_ai_valid_patch_is_draft_and_budget_is_reserved(env):
     assert len(captured) == 1
 
 
+@pytest.mark.parametrize("length_limited", [False, True])
+def test_deepseek_structured_mode_and_truncated_output(env, length_limited):
+    app, _, root = env
+    row = first(app)
+    def fake(request):
+        packet = json.loads(request.content)
+        assert packet["thinking"] == {"type": "disabled"}
+        assert packet["response_format"] == {"type": "json_object"}
+        return httpx.Response(200, json={"choices": [{"finish_reason": "length" if length_limited else "stop", "message": {"content": "{" if length_limited else json.dumps(advice(row))}}], "usage": {"prompt_tokens": 50, "completion_tokens": 30}})
+    app.state.store.put("config", "ai", {"endpoint": "https://api.deepseek.com", "model": "deepseek-flash", "output_format": "json_object", "token_limit": 100000})
+    app.state.store.set_secret("ai-key", "generated-key")
+    advisor = AiAdvisor(app.state.store, httpx.MockTransport(fake))
+    before = sha(root / row["path"])
+    if length_limited:
+        with pytest.raises(ValueError, match="截断"):
+            advisor.analyze([row], [evidence(row)], "生成测试")
+        assert not app.state.store.all("ai-cache")
+    else:
+        assert advisor.analyze([row], [evidence(row)], "生成测试")["suggestions"]
+    assert sha(root / row["path"]) == before
+
+
+def test_rejected_ai_response_is_retained_privately_without_credentials(env):
+    app, _, root = env
+    row = first(app)
+    invalid = advice(row, refs=["fabricated-source"])
+    app.state.store.put("config", "ai", {"endpoint": "https://ai.example/v1", "model": "generated", "token_limit": 100000})
+    app.state.store.set_secret("ai-key", "private-generated-key")
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(invalid)}}]}))
+    before = sha(root / row["path"])
+    with pytest.raises(ValueError, match="伪造证据"):
+        AiAdvisor(app.state.store, transport).analyze([row], [evidence(row)], "生成测试")
+    rejected = app.state.store.all("ai-rejection")
+    assert len(rejected) == 1 and json.loads(rejected[0]["response"]) == invalid
+    assert "private-generated-key" not in json.dumps(rejected)
+    assert not app.state.store.all("ai-cache") and sha(root / row["path"]) == before
+
+
+@pytest.mark.parametrize("reference", ["e001", "e999", "来源解释文字"])
+def test_ai_short_evidence_ids_are_resolved_and_unknown_refs_rejected(env, reference):
+    app, _, _ = env
+    row = first(app)
+    app.state.store.put("config", "ai", {"endpoint": "https://ai.example/v1", "model": "generated", "token_limit": 100000})
+    app.state.store.set_secret("ai-key", "generated-key")
+    def fake(request):
+        packet = json.loads(request.content)
+        data = json.loads(packet["messages"][1]["content"])
+        assert data["candidates"][0]["id"] == "e001"
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(advice(row, refs=[reference]))}}]})
+    advisor = AiAdvisor(app.state.store, httpx.MockTransport(fake))
+    if reference == "e001":
+        result = advisor.analyze([row], [evidence(row)], "生成测试")
+        assert result["suggestions"][0]["evidence"] == ["mb:real"]
+        assert app.state.store.all("ai-cache")[0]["suggestions"][0]["evidence"] == ["mb:real"]
+    else:
+        with pytest.raises(ValueError, match="伪造证据"):
+            advisor.analyze([row], [evidence(row)], "生成测试")
+
+
 @pytest.mark.parametrize("failure", [429, 503, "malformed", "timeout"])
 def test_ai_failures_never_modify_files_or_restore_consumed_budget(env, failure):
     app, _, root = env
@@ -368,6 +461,48 @@ def test_remote_ids_are_not_guessed_from_titles(env):
     assert not first(app).get("server_id")
 
 
+def test_metadata_unknown_duration_cannot_support_a_write(env, monkeypatch):
+    app, _, _ = env
+    row = first(app)
+    rid = "11111111-1111-4111-8111-111111111111"
+    recording = {"id": rid, "title": "Generated title", "length": None, "artist-credit": [], "releases": []}
+    def fake(request):
+        return httpx.Response(200, json={"recordings": [recording]} if request.url.path.endswith("/recording") else recording)
+    monkeypatch.setattr("jiayin_manager.providers.time.sleep", lambda _: None)
+    provider = MetadataProvider(app.state.store, httpx.MockTransport(fake))
+    candidates = provider.candidates(row)
+    assert len(candidates) == 1 and candidates[0]["duration"] == 0
+    advice = {"suggestions": [{"file_id": row["id"], "values": {"title": "Generated title"}, "evidence": [candidates[0]["id"]], "reason": "Generated evidence", "status": "supported"}]}
+    with pytest.raises(ValueError, match="时长"):
+        AiAdvisor.validate(advice, [row], candidates)
+
+
+@pytest.mark.parametrize("mismatch", ["none", "size", "duration", "hidden", "duplicate"])
+def test_physical_paths_bind_virtual_api_paths_readonly(env, monkeypatch, tmp_path, mismatch):
+    import sqlite3
+    app, _, root = env
+    row = first(app)
+    path = tmp_path / "server.db"
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE media_file(id TEXT,path TEXT,duration REAL,size INTEGER)")
+        db.execute("INSERT INTO media_file VALUES(?,?,?,?)", ("s1", row["path"], row["duration"], row["size"]))
+        if mismatch == "duplicate":
+            db.execute("INSERT INTO media_file VALUES(?,?,?,?)", ("s2", row["path"], row["duration"], row["size"]))
+    before = sha(path)
+    monkeypatch.setenv("JIAYIN_NAVIDROME_DB", str(path))
+    song = {"id": "s1", "path": "virtual/album/song.wav", "duration": row["duration"], "size": row["size"]}
+    if mismatch == "size": song["size"] += 1
+    if mismatch == "duration": song["duration"] += 10
+    songs = [] if mismatch == "hidden" else [song]
+    if mismatch == "duplicate": songs.append({**song, "id": "s2"})
+    app.state.navidrome.catalog = lambda: songs
+    app.state.navidrome.request = lambda method, params=None: {"playlists": {"playlist": []}}
+    result = app.state.navidrome.capture()
+    assert result["mapped"] == (1 if mismatch == "none" else 0)
+    assert first(app).get("server_id") == ("s1" if mismatch == "none" else None)
+    assert sha(path) == before
+
+
 def test_remote_verification_blocks_stale_or_changed_ids(env):
     app, _, root = env
     row = first(app)
@@ -378,6 +513,28 @@ def test_remote_verification_blocks_stale_or_changed_ids(env):
     assert next(r for r in nav.verify() if r["file_id"] == row["id"])["ok"]
     nav.catalog = lambda: [{"id": "new-id", "title": row["metadata"]["title"], "album": row["metadata"]["album"], "duration": row["duration"]}]
     assert not next(r for r in nav.verify() if r["file_id"] == row["id"])["ok"]
+
+
+def test_lyric_verification_preserves_server_baseline_without_approving_bad_tags(env):
+    app, _, root = env
+    row = first(app)
+    row["server_id"] = row["baseline_server_id"] = "s1"
+    app.state.store.put("track", row["id"], row)
+    song = {"id": "s1", "title": row["metadata"]["title"], "album": row["metadata"]["album"], "duration": row["duration"], "albumArtists": [{"name": "Existing server fallback"}]}
+    change = app.state.library.lyric_draft(row["id"], "[00:00.00]生成的测试歌词", "generated")
+    job = app.state.library.job([change["id"]])
+    nav = app.state.navidrome
+    nav.request = lambda method, params=None: {"scanStatus": {"scanning": False}}
+    nav.catalog = lambda: [song]
+    app.state.store.put("server-before-job", job["id"], {row["id"]: dict(song)})
+    with pytest.raises(ValueError, match="完成文件任务"):
+        nav.verify(job["id"])
+    app.state.library.run(job["id"])
+    assert nav.verify(job["id"])[0]["ok"]
+    assert not first(app)["scan_verified"]  # Does not open directory migration.
+    assert app.state.store.get("job", job["id"])["status"] == "verified"
+    song["title"] = "Unexpected server change"
+    assert not nav.verify(job["id"])[0]["ok"]
 
 
 def test_shared_catalog_only_exports_verified_bound_ids(env):

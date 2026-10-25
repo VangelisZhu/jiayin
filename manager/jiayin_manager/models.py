@@ -45,10 +45,10 @@ class AnalysisRequest(StrictModel):
 
 
 class Suggestion(StrictModel):
-    file_id: str
-    values: dict
-    evidence: list[str]
-    reason: str = Field(max_length=2000)
+    file_id: str = Field(description="原样复制 files 中的 file_id，不使用歌名或文件路径")
+    values: dict = Field(description="拟修改字段及原始 JSON 值；只允许同一候选支持的字段。无明确修改时返回空对象")
+    evidence: list[str] = Field(description="仅填写 candidates 中的 id，例如 e001。不得放说明文字、网址或虚构编号；无可引用候选时返回空数组")
+    reason: str = Field(max_length=2000, description="简短说明匹配依据或冲突原因；说明文字只放在此字段")
     status: Literal["supported", "conflict", "insufficient"]
 
 

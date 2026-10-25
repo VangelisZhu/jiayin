@@ -250,7 +250,8 @@ def create_app(root=None, data=None, password=None, transport=None):
 
     @app.get("/api/tasks")
     def tasks():
-        return store.all("task")
+        return [{k: v for k, v in task.items() if k != "error" or task["status"] == "failed"}
+                for task in store.all("task")]
 
     @app.get("/api/jobs")
     def jobs():
@@ -266,6 +267,8 @@ def create_app(root=None, data=None, password=None, transport=None):
             job = library.job(body.ids)
             if store.get("config", "navidrome"):
                 store.put("server-state-job", job["id"], store.get("server-state", "latest"))
+                store.put("server-before-job", job["id"], {store.get("change", i)["file_id"]:
+                    store.get("server-before", store.get("change", i)["file_id"]) for i in job["ids"]})
                 job["database_backup"] = snapshot_id + ".sqlite3"
                 store.put("job", job["id"], job)
             return job
@@ -420,6 +423,7 @@ def create_app(root=None, data=None, password=None, transport=None):
             if len(done) >= min(50, sum(not r.get("missing") for r in store.all("track"))):
                 store.put("ai-sample", "latest", sample)
             task = store.get("task", task_id); task.update(status="completed", result=sample)
+            task.pop("error", None)
             store.put("task", task_id, task)
         except Exception as exc:
             task = store.get("task", task_id, {"id": task_id, "kind": "ai"})
@@ -446,6 +450,7 @@ def create_app(root=None, data=None, password=None, transport=None):
             raise ValueError("此分析任务不可继续")
         body = AnalysisRequest.model_validate(task["request"])
         task.update(status="running", cancel=False)
+        task.pop("error", None)
         store.put("task", task_id, task)
         background.add_task(analyze_task, task_id, body)
         return {"ok": True}
