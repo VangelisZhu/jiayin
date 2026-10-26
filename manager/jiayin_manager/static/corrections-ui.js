@@ -1,22 +1,25 @@
 let c;
 export function initCorrections(context){c=context;}
 export async function sourcesPage(){
+ const current=c.navigationGuard();
  const {api,el,text,actions,button,shell,notice}=c;
- const config=await api('sources-config');
+ const config=await api('sources-config');if(!current())return;
  const choices=[['qq','QQ 音乐'],['netease','网易云音乐']].map(([id,label])=>({id,label,input:el('input',{type:'checkbox',checked:config.enabled.includes(id),'aria-label':label})}));
  shell('资料来源','只在主动搜索时查询所选来源；关闭两项后仍可手动编辑。',el('section',{class:'panel'},...choices.map(x=>el('label',{class:'checkfield'},x.input,x.label)),text('公开接口可能限流或变化，来源故障不会阻止播放。AI 设置独立管理。'),button('保存来源',async()=>{await api('sources-config','PUT',{enabled:choices.filter(x=>x.input.checked).map(x=>x.id)});notice('资料来源已更新');},true)));
 }
 export async function membersPage(){
+ const current=c.navigationGuard();
  const {api,el,text,actions,button,shell,notice}=c;
- const members=await api('members');
+ const members=await api('members');if(!current())return;
  shell('成员与权限','成员先在家音设置连接后台，再由管理员批准。直接修改会影响家庭共享音乐文件。',el('div',{},...members.map(m=>{
   const role=el('select',{'aria-label':'权限 '+m.username},...Object.entries({readonly:'只读',request:'提交申请',direct:'直接修改'}).map(([id,label])=>el('option',{value:id},label)));role.value=m.role;
   return el('section',{class:'panel'},el('h2',{},m.username),text(m.approved?(m.enabled?'已批准':'已停用'):'等待批准加入'),actions(role,button('批准 / 保存权限',async()=>{await api('members/'+m.id,'PUT',{role:role.value,enabled:true});notice('权限已更新');await membersPage();},true),button('停用',async()=>{await api('members/'+m.id,'PUT',{role:role.value,enabled:false});await membersPage();})),...m.devices.map(d=>el('div',{class:'issue'},text(d.name+' · '+(d.revoked?'已撤销':'有效')),d.revoked?null:button('撤销设备',async()=>{await api('devices/'+d.id+'/revoke','POST',{});await membersPage();}))));
  })),[button('刷新',membersPage)]);
 }
 export async function correctionsPage(){
+ const current=c.navigationGuard();
  const {api,el,text,actions,button,shell,badge,dialog,notice,diff,names}=c;
- const items=await api('corrections');
+ const items=await api('corrections');if(!current())return;
  shell('资料纠正与审核','选择 QQ／网易云候选或手动编辑。申请不会自动写入文件；目录移动请到“分类与目录”单独审批。',el('div',{},...items.slice().reverse().map(item=>el('section',{class:'panel'},actions(el('strong',{},item.username),badge(({pending:'待审核',approved:'已批准',executing:'正在执行',draft:'待提交'})[item.status]||item.status)),text(item.note||'歌曲资料纠正'),item.source?text('来源：'+item.source.provider+' · '+item.source.url):null,...item.preview.map(p=>el('article',{class:'change'},el('h3',{},p.title),diff(p),p.cover?text('包括内嵌封面；不替换共用目录封面。'):null)),item.error?text(item.error):null,item.message?text(item.message):null,item.status==='executing'&&item.stage?text(item.stage):null,item.review?text('审核说明：'+(item.review.reason||'已核对')):null,
  actions(item.status==='draft'?button('确认并应用',async()=>{await api('corrections/'+item.id+'/submit','POST',{});notice('已提交后台任务');await correctionsPage();},true):null,item.job_id&&['failed','paused'].includes(item.status)?button('继续已批准任务',async()=>{await api('corrections/'+item.id+'/retry','POST',{});await correctionsPage();}):['pending','failed','paused'].includes(item.status)?button('审核',()=>{
   const checks=item.preview.map(p=>({p,input:el('input',{type:'checkbox',checked:true,'aria-label':p.title+' '+p.kind}),fields:Object.keys(p.values).concat(p.cover?['cover']:[]).map(key=>({key,input:el('input',{type:'checkbox',checked:true,'aria-label':p.title+' '+(names[key]||key)})}))}));

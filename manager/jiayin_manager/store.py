@@ -27,6 +27,22 @@ class Store:
             CREATE TABLE IF NOT EXISTS documents(kind TEXT, id TEXT, body TEXT NOT NULL,
                 PRIMARY KEY(kind,id));
             CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, expires INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS document_versions(kind TEXT PRIMARY KEY, version INTEGER NOT NULL);
+            CREATE TRIGGER IF NOT EXISTS track_version_insert AFTER INSERT ON documents
+            WHEN NEW.kind='track' BEGIN
+                INSERT INTO document_versions VALUES('track',1)
+                ON CONFLICT(kind) DO UPDATE SET version=version+1;
+            END;
+            CREATE TRIGGER IF NOT EXISTS track_version_update AFTER UPDATE ON documents
+            WHEN OLD.kind='track' OR NEW.kind='track' BEGIN
+                INSERT INTO document_versions VALUES('track',1)
+                ON CONFLICT(kind) DO UPDATE SET version=version+1;
+            END;
+            CREATE TRIGGER IF NOT EXISTS track_version_delete AFTER DELETE ON documents
+            WHEN OLD.kind='track' BEGIN
+                INSERT INTO document_versions VALUES('track',1)
+                ON CONFLICT(kind) DO UPDATE SET version=version+1;
+            END;
         """)
         self.db.commit()
         key_path = self.path / "vault.key"
@@ -60,6 +76,12 @@ class Store:
         with self.lock:
             rows = self.db.execute("SELECT body FROM documents WHERE kind=? ORDER BY rowid", (kind,)).fetchall()
         return [json.loads(row[0]) for row in rows]
+
+    def track_revision(self):
+        # Triggers also cover direct SQL restores, deletes and transaction rollback.
+        with self.lock:
+            row = self.db.execute("SELECT version FROM document_versions WHERE kind='track'").fetchone()
+        return row[0] if row else 0
 
     def delete(self, kind, key):
         with self.transaction() as db:

@@ -2,7 +2,9 @@ import json
 import os
 import shutil
 import threading
+import time
 import uuid
+from copy import deepcopy
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -25,6 +27,10 @@ class LibraryManager:
             raise ValueError("音乐与后台数据目录必须独立")
         self.operation = threading.RLock()
         self.worker = threading.Lock()
+        self._findings_lock = threading.Lock()
+        self._findings_cache = None
+        self._findings_revision = -1
+        self._findings_expires = 0
         # Interrupted operations remain paused until explicitly resumed. Reconcile journal first.
         for job in store.all("job"):
             if job["status"] == "running":
@@ -69,7 +75,23 @@ class LibraryManager:
             self.store.put("scan", "latest", {"at": stamp(), "count": len(seen), "errors": errors})
             return {"count": len(seen), "errors": errors}
 
-    def findings(self):
+    def findings(self, refresh=False):
+        # Only one request may inspect sidecars. Page navigation must not launch
+        # thousands of filesystem reads again, or stack concurrent scans on NAS.
+        with self._findings_lock:
+            revision = self.store.track_revision()
+            if (not refresh and self._findings_cache is not None
+                    and revision == self._findings_revision
+                    and time.monotonic() < self._findings_expires):
+                return deepcopy(self._findings_cache)
+            result = self._inspect_findings()
+            if revision == self.store.track_revision():
+                self._findings_cache = result
+                self._findings_revision = revision
+                self._findings_expires = time.monotonic() + 300
+            return deepcopy(result)
+
+    def _inspect_findings(self):
         findings, albums = [], defaultdict(list)
         for row in self.store.all("track"):
             if row.get("missing"):
@@ -487,9 +509,9 @@ class LibraryManager:
         change["status"] = "undone"
         self.store.put("change", change["id"], change)
 
-    def summary(self):
+    def summary(self, refresh=False):
         rows = [r for r in self.store.all("track") if not r.get("missing")]
-        findings = self.findings()
+        findings = self.findings(refresh=refresh)
         return {"tracks": len(rows), "albums": len({r["metadata"]["release_id"] or (r["metadata"]["album"], tuple(r["metadata"]["album_artists"]), r["metadata"]["date"], r["metadata"]["album_version"]) for r in rows}),
                 "artists": len({a for r in rows for a in r["metadata"]["artists"]}), "issues": dict(Counter(f["kind"] for f in findings)),
                 "scan": self.store.get("scan", "latest"), "drafts": sum(c["status"] == "draft" for c in self.store.all("change"))}

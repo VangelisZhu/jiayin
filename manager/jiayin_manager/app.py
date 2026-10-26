@@ -175,8 +175,8 @@ def create_app(root=None, data=None, password=None, transport=None):
         return {"ok": True}
 
     @app.get("/api/summary")
-    def summary():
-        return library.summary()
+    def summary(refresh: bool = False):
+        return library.summary(refresh=refresh)
 
     def scan_task(task_id):
         try:

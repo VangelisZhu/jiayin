@@ -81,6 +81,89 @@ def test_scan_and_five_issue_classes(env):
     assert first(app)["id"] == original["id"]
 
 
+def test_findings_cache_single_flight_and_invalidates_on_restore(env, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import time
+    app, client, root = env
+    library, store = app.state.library, app.state.store
+    inspect = library._inspect_findings
+    calls = []
+
+    def slow_inspection():
+        calls.append(1)
+        time.sleep(.05)
+        return inspect()
+
+    monkeypatch.setattr(library, "_inspect_findings", slow_inspection)
+    with ThreadPoolExecutor(max_workers=8) as workers:
+        results = list(workers.map(lambda _: library.findings(), range(8)))
+    assert len(calls) == 1
+    results[0].clear()
+    assert library.findings() == results[1]  # A caller cannot mutate the cache.
+    assert len(calls) == 1
+    # Unrelated authentication, device and task updates do not rescan lyrics.
+    store.session()
+    store.put("task", "generated", {"status": "completed"})
+    library.findings()
+    assert len(calls) == 1
+    row = first(app)
+    row["metadata"]["title"] = "Generated replacement"
+    with store.transaction() as db:
+        db.execute("UPDATE documents SET body=? WHERE kind='track' AND id=?", (json.dumps(row), row["id"]))
+    library.findings()
+    assert len(calls) == 2  # Raw restore writes also invalidate the cache.
+    revision = store.track_revision()
+    with pytest.raises(RuntimeError):
+        with store.transaction() as db:
+            db.execute("DELETE FROM documents WHERE kind='track'")
+            raise RuntimeError("generated rollback")
+    assert store.track_revision() == revision
+    store.delete("track", row["id"])
+    library.findings()
+    assert len(calls) == 3
+
+
+def test_cached_lyrics_refresh_on_apply_undo_and_external_edit(env):
+    app, client, root = env
+    library = app.state.library
+    row = first(app)
+    lyric = (root / row["path"]).with_suffix(".lrc")
+    lyric.write_bytes("[00:01]Generated lyrics".encode("utf-16"))
+    kinds = lambda: {f["kind"] for f in library.findings() if f["file_id"] == row["id"]}
+    assert "lyrics_encoding" in kinds()
+    change = library.lyric_draft(row["id"], "[00:01]Correct lyrics", "manual")
+    job = library.job([change["id"]])
+    library.run(job["id"])
+    assert "lyrics_encoding" not in kinds()
+    undo = library.job([change["id"]], undo=True)
+    library.run(undo["id"])
+    assert "lyrics_encoding" in kinds()
+    lyric.write_text("[00:01]External correction", encoding="utf-8")
+    # An explicit refresh is available without rescanning/hashing audio files.
+    client.get("/api/summary?refresh=true").raise_for_status()
+    assert "lyrics_encoding" not in kinds()
+
+
+def test_findings_cache_expires_and_track_revision_survives_restart(env, monkeypatch):
+    app, client, root = env
+    library, store = app.state.library, app.state.store
+    library.findings()
+    old = store.track_revision()
+    restarted = Store(store.path)
+    assert restarted.track_revision() == old
+    row = first(app)
+    restarted.put("track", row["id"], row)
+    assert store.track_revision() > old
+    library.findings()
+    monkeypatch.setattr(library, "_findings_expires", 0)
+    calls = []
+    inspect = library._inspect_findings
+    monkeypatch.setattr(library, "_inspect_findings", lambda: (calls.append(1), inspect())[1])
+    library.findings()
+    assert len(calls) == 1
+    restarted.db.close()
+
+
 def test_corrupt_audio_does_not_abort_scan(env):
     app, client, root = env
     damaged = root / "broken.mp3"

@@ -31,6 +31,7 @@ jobs:
           python -m pytest manager/tests -q --junitxml=manager-results.xml
           node --input-type=module --check < manager/jiayin_manager/static/app.js
           node --input-type=module --check < manager/jiayin_manager/static/corrections-ui.js
+          node --experimental-vm-modules --test manager/tests/test_navigation.mjs
       - name: Build NAS container
         run: docker build -t jiayin-manager:ci manager
       - uses: actions/upload-artifact@v4
