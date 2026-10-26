@@ -46,6 +46,7 @@ import kotlinx.coroutines.withContext
         }
         item { SheetActionPadded("最近听过", R.drawable.ic_timer) { route("history") } }
         item { SheetActionPadded("下载与离线", R.drawable.ic_download) { route("downloads") } }
+        item { SheetActionPadded("曲库整理 · 我的申请", R.drawable.ic_settings) { route("corrections") } }
         item { SectionTitle("我的歌单", "新建", newPlaylist) }
         items(ui.library.playlists, key = { it.id }) { p -> ListItem(headlineContent = { Text(p.name) }, supportingContent = { Text("${p.tracks.size} 首${if (p.pending) " · 等待同步" else ""}") }, leadingContent = { PlaylistCover(p, ui.library.tracks, Modifier.size(58.dp)) }, modifier = Modifier.clickable { collection(p) }) }
         item { HorizontalDivider(Modifier.padding(horizontal = 24.dp, vertical = 18.dp)); Text(ui.connection, Modifier.padding(horizontal = 24.dp), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant); SheetActionPadded("连接测试${if (ui.pending > 0) " · ${ui.pending} 项待同步" else ""}", R.drawable.ic_refresh) { vm.test() } }
@@ -66,6 +67,7 @@ import kotlinx.coroutines.withContext
     var clear by remember { mutableStateOf(false) }
     var retryUncertain by remember { mutableStateOf(false) }
     var manager by remember { mutableStateOf(false) }
+    var correctionManager by remember { mutableStateOf(false) }
     var managerUrl by remember { mutableStateOf(p.getString("${settingsRepo.account}.manager-url", "").orEmpty()) }
     var managerToken by remember { mutableStateOf("") }
     var managerBusy by remember { mutableStateOf(false) }
@@ -76,6 +78,7 @@ import kotlinx.coroutines.withContext
         item { PageTitle("设置", back = back) }
         item { ListItem(headlineContent = { Text("音乐服务器 · 切换与退出") }, supportingContent = { Text("${settingsRepo.profiles.find(settingsRepo.account)?.name.orEmpty()} · ${settingsRepo.user}\n${ui.connection}", fontSize = 12.sp) }, modifier = Modifier.clickable(onClick = servers)) }
         item { ListItem(headlineContent = { Text("NAS 曲库管理 · 共享分类") }, supportingContent = { Text(if (managerUrl.isBlank()) "可选连接；普通 OpenSubsonic 播放不需要" else "已配置 · 只读取当前账户的已核对分类") }, modifier = Modifier.clickable { manager = true }) }
+        item { ListItem(headlineContent = { Text("资料纠正 · 账户权限与申请") }, supportingContent = { Text("连接配套后台，按当前音乐账户授权") }, modifier = Modifier.clickable { correctionManager = true }) }
         item { SectionTitle("播放与恢复") }
         item { SettingToggle("被视频打断后自动恢复", "默认关闭。仅恢复被声音打断的音乐，不覆盖主动暂停或耳机断开。", "auto-resume", false, vm) }
         item { SettingToggle("队列结束后推荐续播", "从现有曲库继续挑选；与循环播放独立。", "recommend-autoplay", false, vm) }
@@ -107,6 +110,7 @@ import kotlinx.coroutines.withContext
         item { TextButton({ clear = true }, Modifier.padding(horizontal = 18.dp)) { Text("清空收听记录与推荐偏好") } }
         item { Text("开源许可：GPL-3.0。家音基于 Tempus v4.30.0；完整源码和第三方许可随安装包提供。", Modifier.padding(24.dp), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
     }
+    if (correctionManager) CorrectionPage(vm, CorrectionTarget()) { correctionManager = false }
     if (manager) AlertDialog(onDismissRequest = { if (!managerBusy) manager = false }, title = { Text("连接 NAS 曲库管理") }, text = {
         Column(Modifier.verticalScroll(rememberScrollState())) {
             Text("在网页后台生成只读连接码。后台绑定的音乐服务器地址和账户必须与当前账户一致。密钥按账户加密保存，退出账户后需重新配置。", fontSize = 12.sp)

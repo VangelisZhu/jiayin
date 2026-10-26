@@ -72,7 +72,7 @@ import sh.calvin.reorderable.*
     }
 }
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-@Composable fun FullPlayer(ui: HomeState, playback: PlaybackState, vm: JiayinViewModel, dark: Boolean, close: () -> Unit, addToPlaylist: (Track) -> Unit = {}, artist: (Track) -> Unit = {}) {
+@Composable fun FullPlayer(ui: HomeState, playback: PlaybackState, vm: JiayinViewModel, dark: Boolean, close: () -> Unit, addToPlaylist: (Track) -> Unit = {}, artist: (Track) -> Unit = {}, correct: (Track) -> Unit = {}) {
     var lyrics by rememberSaveable { mutableStateOf(false) }
     var queue by rememberSaveable { mutableStateOf(false) }
     var timer by remember { mutableStateOf(false) }
@@ -87,8 +87,8 @@ import sh.calvin.reorderable.*
         lifecycle.addObserver(observer); onDispose { lifecycle.removeObserver(observer) }
     }
     val reduced = animationsReduced()
-    val t = playback.current
-    val actual = ui.library.tracks.find { it.id == t?.id } ?: t
+    val t = ui.library.tracks.find { it.id == playback.current?.id } ?: playback.current
+    val actual = t
     val visual = coverVisual(t?.cover.orEmpty())
     val foreground = if (dark) Color(0xFFF2F5F1) else Color(0xFF202A28)
     BackHandler { if (lyrics) lyrics = false else close() }
@@ -148,6 +148,7 @@ import sh.calvin.reorderable.*
                         TextButton({ queue = true }) { AppIcon(R.drawable.ic_queue, "队列", tint = foreground); Spacer(Modifier.width(6.dp)); Text("队列", color = foreground, fontSize = 13.sp) }
                         TextButton({ addToPlaylist(t) }) { AppIcon(R.drawable.ic_playlist_add, "加入歌单", tint = foreground) }
                         TextButton({ vm.download(listOf(t)) }) { AppIcon(R.drawable.ic_download, "下载", tint = foreground) }
+                        TextButton({ correct(t) }) { Text("纠正信息", color = foreground) }
                     }
                     })
                 }

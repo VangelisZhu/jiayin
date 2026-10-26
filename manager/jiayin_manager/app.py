@@ -89,7 +89,17 @@ def create_app(root=None, data=None, password=None, transport=None):
     navidrome = Navidrome(store, library, transport)
     auth_attempts, auth_lock = {}, threading.Lock()
     ai_task_lock = threading.Lock()
-    app = FastAPI(title="家音曲库管理", docs_url=None, redoc_url=None, openapi_url=None)
+    @asynccontextmanager
+    async def lifespan(instance):
+        service = instance.state.corrections
+        worker = threading.Thread(target=service.scheduler, daemon=True, name="jiayin-corrections")
+        worker.start()
+        try:
+            yield
+        finally:
+            service.stopped.set()
+            worker.join(timeout=2)
+    app = FastAPI(title="家音曲库管理", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.store, app.state.library, app.state.advisor, app.state.navidrome = store, library, advisors, navidrome
 
     @app.exception_handler(ValueError)
@@ -106,7 +116,14 @@ def create_app(root=None, data=None, password=None, transport=None):
         if request.headers.get("content-length", "0").isdigit() and int(request.headers.get("content-length", "0")) > 2 * 1024 * 1024:
             return JSONResponse({"detail": "请求过大"}, status_code=413)
         if path.startswith("/api/"):
-            if path == "/api/client/catalog":
+            if path.startswith("/api/member/"):
+                if request.method != "GET" and request.headers.get("x-jiayin-request") != "1":
+                    return JSONResponse({"detail": "缺少客户端请求标识"}, status_code=403)
+                origin = request.headers.get("origin")
+                if origin and origin not in {str(request.base_url).rstrip("/"), os.getenv("JIAYIN_PUBLIC_ORIGIN", "").rstrip("/")}:
+                    return JSONResponse({"detail": "请求来源不匹配"}, status_code=403)
+                # Every member route authenticates its device and checks live permissions.
+            elif path == "/api/client/catalog":
                 given = request.headers.get("authorization", "").removeprefix("Bearer ")
                 digest = store.get("auth", "client-token")
                 if not digest or not hmac.compare_digest(hashlib.sha256(given.encode()).hexdigest(), digest):
@@ -490,11 +507,28 @@ def create_app(root=None, data=None, password=None, transport=None):
 
     @app.post("/api/navidrome/scan")
     def server_scan():
-        return navidrome.start_scan()
+        result = navidrome.start_scan()
+        for item in store.all("correction"):
+            if item["status"] == "awaiting_scan":
+                item.update(scan_requested=True, verify_attempts=0, next_check=stamp() + 5)
+                store.put("correction", item["id"], item)
+        return result
 
     @app.post("/api/navidrome/verify")
     def verify(job_id: str | None = None):
-        return navidrome.verify(job_id)
+        results = navidrome.verify(job_id)
+        for item in store.all("correction"):
+            if item.get("job_id") and (not job_id or item["job_id"] == job_id):
+                job = store.get("job", item["job_id"], {})
+                if job.get("status") == "verified":
+                    item["status"] = "verified"
+                    store.put("correction", item["id"], item)
+            if job_id:
+                verified = store.get("job", job_id, {})
+                if verified.get("undo") and verified.get("status") == "verified" and set(item["ids"]) & set(verified["ids"]):
+                    item["status"] = "undone"
+                    store.put("correction", item["id"], item)
+        return results
 
     @app.post("/api/client/token")
     def client_token():
@@ -522,11 +556,18 @@ def create_app(root=None, data=None, password=None, transport=None):
                 # Deliberate allowlist: never export vault, secrets, auth, session DB or raw config.
                 for kind in ("track", "change", "job", "identity", "server-before", "verification"):
                     archive.writestr(kind + ".json", json.dumps(store.all(kind), ensure_ascii=False))
+                archive.writestr("correction.json", json.dumps([{k: v for k, v in c.items() if k != "device_digest"} for c in store.all("correction")], ensure_ascii=False))
+                for cover in (store.path / "artwork").glob("*.jpg"):
+                    if __import__("re").fullmatch(r"[0-9a-f]{64}\.jpg", cover.name) and cover.is_file() and not cover.is_symlink():
+                        archive.write(cover, "artwork/" + cover.name)
                 if folder.exists():
                     for path in folder.rglob("*"):
                         if path.is_file() and not path.is_symlink():
                             archive.write(path, "backups/" + path.relative_to(folder).as_posix())
             return FileResponse(export_path, media_type="application/zip", filename="jiayin-recovery.zip", background=BackgroundTask(export_path.unlink, missing_ok=True))
+
+    from .corrections import install_corrections
+    install_corrections(app, store, library, navidrome, transport)
 
     static = Path(__file__).parent / "static"
     app.mount("/static", StaticFiles(directory=static), name="static")

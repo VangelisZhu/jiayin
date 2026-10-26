@@ -193,6 +193,27 @@ class JiayinMediaService : MediaLibraryService() {
         ContextCompat.registerReceiver(this, noisy, IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY), ContextCompat.RECEIVER_NOT_EXPORTED)
         getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(network)
         scope.launch {
+            PlaybackHub.metadataRevision.collect {
+                if (!quiescing && repo.currentSession()) {
+                    val updated = withContext(Dispatchers.IO) { repo.library().tracks.associateBy { it.id } }
+                    if (!quiescing && repo.currentSession()) { tracks = updated; publish() }
+                }
+            }
+        }
+        scope.launch {
+            var sent = false
+            while (isActive && repo.currentSession()) {
+                if (!repo.offline && !repo.vault.get("${repo.account}.manager-member").isNullOrBlank() && (player.isPlaying || sent)) {
+                    val ids = com.google.gson.JsonArray().apply { if (player.isPlaying) state.current?.trackId?.let { add(it) } }
+                    try {
+                        com.eddyizm.tempus.jiayin.data.ManagerCorrections(repo).request("playback", com.google.gson.JsonObject().apply { add("ids", ids) })
+                        sent = player.isPlaying
+                    } catch (e: CancellationException) { throw e } catch (_: Exception) { /* Optional companion never interrupts playback. */ }
+                }
+                delay(15_000)
+            }
+        }
+        scope.launch {
             // Restore and button commands share the same lock. An old paused queue must never
             // supersede a song the user has just chosen while startup IO is still running.
             commands.withLock {

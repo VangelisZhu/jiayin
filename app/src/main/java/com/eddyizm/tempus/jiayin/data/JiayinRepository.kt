@@ -110,7 +110,10 @@ class JiayinRepository(val context: Context, private val fixedSession: AccountSe
         return "$server/rest/$method.view".toHttpUrl().newBuilder()
             .addQueryParameter("u", user).addQueryParameter("t", auth.first)
             .addQueryParameter("s", auth.second).addQueryParameter("v", "1.16.1")
-            .addQueryParameter("c", "Jiayin").addQueryParameter("id", id).apply { extra.forEach { (k, v) -> addQueryParameter(k, v) } }.build().toString()
+            .addQueryParameter("c", "Jiayin").addQueryParameter("id", if (method == "getCoverArt") VersionedCover.original(id) else id).apply {
+                if (method == "getCoverArt" && id.startsWith("jv:")) addQueryParameter("jiayinRevision", id.split(':', limit = 3)[1])
+                extra.forEach { (k, v) -> addQueryParameter(k, v) }
+            }.build().toString()
     }
 
     private fun requestAt(address: String, user: String, token: String, salt: String, method: String, params: Map<String, List<String>> = emptyMap()): JsonObject {

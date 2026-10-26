@@ -72,6 +72,7 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
     private var downloadEpoch = 0L
     private val artistRequests = mutableSetOf<String>()
     private var discoveryJob: Job? = null
+    private var lastCorrectionCheck = 0L
     var selectedCollection: MusicList? = null
     var searchOrigin: SearchReturnLocation? = null
     init {
@@ -247,9 +248,15 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun sync() = task {
         mutable.update { it.copy(loading = true, status = "正在同步曲库") }
-        try { repo.synchronize { progress -> mutable.update { it.copy(status = progress) } }; refreshLocal(); mutable.update { it.copy(connection = "已连接 NAS") }; message("曲库已同步") }
+        try { repo.synchronize { progress -> mutable.update { it.copy(status = progress) } }; if (!repo.vault.get("${repo.account}.manager-member").isNullOrBlank()) runCatching { ManagerCorrections(repo).refresh() }; refreshLocal(); mutable.update { it.copy(connection = "已连接 NAS") }; message("曲库已同步") }
         catch (e: Exception) { mutable.update { it.copy(connection = "暂时离线 · 使用手机上的曲库与下载") }; throw e }
         finally { mutable.update { it.copy(loading = false) } }
+    }
+    fun refreshCorrections() = task {
+        val scoped = repo.scoped()
+        com.eddyizm.tempus.jiayin.data.ManagerCorrections(scoped).refresh()
+        refreshLocal()
+        if (PlaybackHub.state.value.current != null) loadLyrics(false)
     }
     fun test() = task { try { val result = repo.testConnection(); mutable.update { it.copy(connection = result) }; message(result) } catch (e: Exception) { mutable.update { it.copy(connection = "连接失败 · 可继续使用下载与本地曲库") }; throw e } }
     fun command(action: String, build: Bundle.() -> Unit = {}) {
@@ -268,7 +275,15 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
             if (result.get().resultCode != androidx.media3.session.SessionResult.RESULT_SUCCESS) message("播放操作未完成，请重试")
         }.onFailure { message("播放服务连接已断开，请重新点播放"); controller = null; controllerFuture = null } }, ContextCompat.getMainExecutor(getApplication()))
     }
-    fun foreground() { if (!frozen && repo.configured) { connect(); if (controller != null) command("foreground") } }
+    fun foreground() {
+        if (!frozen && repo.configured) {
+            connect(); if (controller != null) command("foreground")
+            if (!repo.offline && System.currentTimeMillis() - lastCorrectionCheck > 30_000 && !repo.vault.get("${repo.account}.manager-member").isNullOrBlank()) {
+                lastCorrectionCheck = System.currentTimeMillis()
+                task { runCatching { ManagerCorrections(repo).refresh(); refreshLocal() } }
+            }
+        }
+    }
     fun start(tracks: List<Track>, shuffle: Boolean = false, source: String = "播放队列", index: Int = 0) = task {
         if (tracks.isEmpty()) { message("这里还没有歌曲"); return@task }
         val recent = state.value.records.values.sortedByDescending { it.lastHeard }.take(100).map { it.id }.toSet()

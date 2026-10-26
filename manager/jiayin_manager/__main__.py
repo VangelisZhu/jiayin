@@ -82,7 +82,7 @@ def main():
         kinds = {"track", "change", "job", "identity", "server-before", "verification"}
         with zipfile.ZipFile(args.backup) as archive:
             for info in archive.infolist():
-                if info.filename not in {k + ".json" for k in kinds} and not re.fullmatch(r"backups/[0-9a-f]{32}/[0-9]+", info.filename):
+                if info.filename not in {k + ".json" for k in kinds} | {"correction.json"} and not re.fullmatch(r"backups/[0-9a-f]{32}/[0-9]+|artwork/[0-9a-f]{64}\.jpg", info.filename):
                     raise ValueError("备份中包含不允许的路径")
             store = Store(args.data)
             for kind in kinds:
@@ -90,8 +90,13 @@ def main():
                 for value in values:
                     key = value.get("id") or value.get("file_id") or "latest"
                     store.put(kind, key, value)
+            if "correction.json" in archive.namelist():
+                for value in json.loads(archive.read("correction.json")):
+                    if value["status"] in {"approved", "executing", "waiting_playback"}:
+                        value["status"] = "paused"
+                    store.put("correction", value["id"], value)
             for info in archive.infolist():
-                if info.filename.startswith("backups/"):
+                if info.filename.startswith(("backups/", "artwork/")):
                     target = args.data / info.filename
                     target.parent.mkdir(parents=True, exist_ok=True)
                     with archive.open(info) as source, target.open("wb") as output:

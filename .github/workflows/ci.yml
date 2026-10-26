@@ -30,6 +30,7 @@ jobs:
         run: |
           python -m pytest manager/tests -q --junitxml=manager-results.xml
           node --check manager/jiayin_manager/static/app.js
+          node --check manager/jiayin_manager/static/corrections-ui.js
       - name: Build NAS container
         run: docker build -t jiayin-manager:ci manager
       - uses: actions/upload-artifact@v4
@@ -60,7 +61,7 @@ jobs:
       - name: Check and build
         run: |
           chmod +x gradlew
-          ./gradlew testDegoogledDebugUnitTest testTempusDebugUnitTest lintDegoogledRelease assembleDegoogledRelease --console=plain
+          ./gradlew testDegoogledDebugUnitTest testTempusDebugUnitTest lintDegoogledRelease lintTempusRelease assembleDegoogledRelease assembleTempusRelease --console=plain
       - name: Test reports
         if: always()
         uses: actions/upload-artifact@v4

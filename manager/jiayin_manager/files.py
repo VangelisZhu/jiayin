@@ -185,6 +185,47 @@ def audio_hash(path: Path):
     return digest.hexdigest()
 
 
+def write_artwork(path: Path, raw: bytes):
+    """Replace only front artwork, preserving other embedded pictures and tags."""
+    import base64
+    from mutagen.flac import FLAC, Picture
+    from mutagen.id3 import APIC
+    from mutagen.mp4 import MP4Cover
+    audio = mutagen.File(path)
+    if audio is None:
+        raise ValueError("无法识别封面目标格式")
+    if audio.tags is None:
+        audio.add_tags()
+    tags = audio.tags
+    if isinstance(tags, ID3):
+        retained = [p for p in tags.getall("APIC") if p.type != 3]
+        tags.delall("APIC")
+        for picture in retained:
+            tags.add(picture)
+        tags.add(APIC(encoding=3, mime="image/jpeg", type=3, desc="Jiayin front", data=raw))
+    elif isinstance(audio, MP4):
+        tags["covr"] = [MP4Cover(raw, imageformat=MP4Cover.FORMAT_JPEG)]
+    else:
+        picture = Picture()
+        picture.type, picture.mime, picture.data = 3, "image/jpeg", raw
+        if isinstance(audio, FLAC):
+            retained = [p for p in audio.pictures if p.type != 3]
+            audio.clear_pictures()
+            for old in retained:
+                audio.add_picture(old)
+            audio.add_picture(picture)
+        else:
+            retained = []
+            for value in tags.get("metadata_block_picture", []):
+                try:
+                    if Picture(base64.b64decode(value)).type != 3:
+                        retained.append(value)
+                except (ValueError, TypeError):
+                    raise ValueError("已有封面结构损坏，请先人工核对") from None
+            tags["metadata_block_picture"] = retained + [base64.b64encode(picture.write()).decode("ascii")]
+    audio.save()
+
+
 def broken(text: str):
     return "\ufffd" in text or any(unicodedata.category(c) in {"Cs", "Cc"} and c not in "\n\r\t" for c in text)
 

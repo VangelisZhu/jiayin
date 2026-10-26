@@ -154,7 +154,7 @@ import sh.calvin.reorderable.*
     }
 }
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-@Composable fun CollectionPage(list: MusicList, ui: HomeState, vm: JiayinViewModel, back: () -> Unit, menu: (Track) -> Unit, rename: () -> Unit, update: (MusicList) -> Unit) {
+@Composable fun CollectionPage(list: MusicList, ui: HomeState, vm: JiayinViewModel, back: () -> Unit, menu: (Track) -> Unit, rename: () -> Unit, update: (MusicList) -> Unit, correct: (List<Track>) -> Unit = {}) {
     val byId = remember(ui.library.tracks) { ui.library.tracks.associateBy { it.id } }
     val tracks = list.tracks.mapNotNull { byId[it] }
     val editable = ui.library.playlists.any { it.id == list.id }
@@ -171,6 +171,7 @@ import sh.calvin.reorderable.*
     }
     Column {
         PageTitle(if (editing) "管理歌单" else "", if (editing) "已选 ${selected.size} 首" else null, back) {
+            if (!editing && !editable) TextButton({ correct(tracks) }) { Text("纠正资料") }
             if (editing) TextButton({ vm.savePlaylist(list.id, list.name, editIds); editing = false }) { Text("保存") }
             else if (editable) IconAction(R.drawable.ic_more_vert, "管理歌单") { editing = true; editIds = list.tracks }
         }

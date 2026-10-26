@@ -15,8 +15,8 @@ android {
         //noinspection OldTargetApi
         targetSdk = 37
 
-        versionCode 10010
-        versionName '1.0.0-preview.10'
+        versionCode 10011
+        versionName '1.0.0-preview.11'
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
 
         javaCompileOptions {

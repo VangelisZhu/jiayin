@@ -8,7 +8,7 @@ from pathlib import Path
 
 from mutagen import MutagenError
 
-from .files import EXTENSIONS, audio_hash, broken, read_metadata, safe_path, sha, target_path, write_metadata
+from .files import EXTENSIONS, audio_hash, broken, read_metadata, safe_path, sha, target_path, write_metadata, write_artwork
 from .models import checked_values
 from .store import stamp
 
@@ -124,6 +124,11 @@ class LibraryManager:
             if source != "manual" and set(values) & set(row["locks"]):
                 raise ValueError("关联字段已被人工锁定，请重新检查建议")
             allowed = {k: v for k, v in values.items() if source == "manual" or k not in row["locks"]}
+            if any(k in allowed and allowed[k] != row["metadata"][k] for k in ("album", "album_artists", "album_version", "date")):
+                if source != "manual" and {"release_id", "release_track_id"} & set(row["locks"]):
+                    raise ValueError("关联发行身份已被人工锁定，请先核对")
+                for identity in ("release_id", "release_track_id"):
+                    allowed.setdefault(identity, "")
             diff = {k: v for k, v in allowed.items() if row["metadata"][k] != v}
             if not diff:
                 continue
@@ -155,19 +160,27 @@ class LibraryManager:
             changes.append(change)
         return changes
 
-    def lyric_draft(self, file_id, text, origin):
+    def artwork_draft(self, file_id, asset):
+        row = self.track(file_id)
+        change = {"id": uid(), "file_id": file_id, "kind": "artwork", "path": row["path"],
+                  "before_hash": row["hash"], "before": {"cover": "当前内嵌封面"}, "values": {},
+                  "artwork": asset, "lock": False, "source": "manual", "evidence": [], "status": "draft", "at": stamp()}
+        self.store.put("change", change["id"], change)
+        return change
+
+    def lyric_draft(self, file_id, text, origin, translation=False):
         if not isinstance(text, str) or not text.strip() or len(text.encode()) > 1024 * 1024 or broken(text):
             raise ValueError("歌词为空、过长或仍含损坏字符")
         row = self.track(file_id)
         audio = safe_path(self.root, row["path"])
-        path = audio.with_suffix(".lrc")
+        path = audio.with_suffix(".zh.lrc" if translation else ".lrc")
         safe_path(self.root, path.relative_to(self.root).as_posix(), False)
         if path.exists() and path.stat().st_size > 1024 * 1024:
             raise ValueError("原歌词文件过大，请单独检查")
         change = {"id": uid(), "file_id": file_id, "kind": "lyrics", "path": path.relative_to(self.root).as_posix(),
                   "before_hash": sha(path) if path.exists() else None, "audio_hash": row["hash"],
                   "before": {"lyrics": path.read_bytes().decode("utf-8", "replace") if path.exists() else ""},
-                  "values": {"lyrics": text}, "lock": False, "source": origin, "evidence": [], "status": "draft", "at": stamp()}
+                  "values": {"lyrics": text}, "translation": translation, "lock": False, "source": origin, "evidence": [], "status": "draft", "at": stamp()}
         self.store.put("change", change["id"], change)
         return change
 
@@ -178,7 +191,7 @@ class LibraryManager:
                 raise ValueError("修改草稿不存在")
             if len({c["kind"] == "move" for c in changes}) > 1:
                 raise ValueError("标签与目录迁移必须分批执行")
-            if len({(c["file_id"], c["kind"]) for c in changes}) != len(changes):
+            if len({(c["file_id"], c["kind"], c.get("translation", False)) for c in changes}) != len(changes):
                 raise ValueError("同一曲目有重叠修改，请先选择一个草稿")
             if any((c["status"] not in {"applied", "queued"} or not c.get("effects")) if undo else c["status"] != "draft" for c in changes):
                 raise ValueError("草稿已执行或正在其他任务中")
@@ -209,6 +222,15 @@ class LibraryManager:
                 try:
                     with self.operation:
                         change = self.store.get("change", change_id)
+                        if change.get("correction_id") and not job["undo"]:
+                            self.correction_guard(change)
+                        if change["kind"] == "lyrics":
+                            # Earlier approved tag/cover writes in this exact job may change
+                            # the container hash; only accept their journalled final hash.
+                            for previous_id, result in job["results"].items():
+                                previous = self.store.get("change", previous_id)
+                                if result.get("ok") and previous["file_id"] == change["file_id"] and previous["kind"] in {"tags", "artwork"} and previous["before_hash"] == change["audio_hash"]:
+                                    change["audio_hash"] = previous["effects"][0]["after"]
                         if change["status"] == "rejected":
                             job["results"][change_id] = {"ok": True, "skipped": True}
                             self.store.put("job", job_id, job)
@@ -320,10 +342,19 @@ class LibraryManager:
             if path.exists() and shutil.disk_usage(path.parent).free < path.stat().st_size + 8 * 1024 * 1024:
                 raise ValueError("音乐目录暂存空间不足")
             try:
-                if change["kind"] == "tags":
+                if change["kind"] in {"tags", "artwork"}:
                     before_audio = audio_hash(path)
                     shutil.copy2(path, temporary)
-                    write_metadata(temporary, change["values"])
+                    if change["kind"] == "tags":
+                        write_metadata(temporary, change["values"])
+                    if change.get("artwork"):
+                        asset = change["artwork"]
+                        if not __import__("re").fullmatch(r"[a-f0-9]{64}", asset):
+                            raise ValueError("封面标识无效")
+                        cover = self.store.path / "artwork" / (asset + ".jpg")
+                        if not cover.is_file() or sha(cover) != asset:
+                            raise ValueError("封面暂存缺失或校验失败")
+                        write_artwork(temporary, cover.read_bytes())
                     if audio_hash(temporary) != before_audio:
                         raise ValueError("标签修改影响了音频，已阻止写入")
                     actual, _ = read_metadata(temporary)

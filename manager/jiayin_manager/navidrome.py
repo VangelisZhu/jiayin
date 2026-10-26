@@ -166,6 +166,10 @@ class Navidrome:
         return self.request("startScan").get("scanStatus", {})
 
     def verify(self, job_id=None):
+        with self.library.operation:
+            return self._verify(job_id)
+
+    def _verify(self, job_id=None):
         status = self.request("getScanStatus").get("scanStatus", {})
         if status.get("scanning"):
             raise ValueError("Navidrome 仍在扫描，请稍后核对")
@@ -198,7 +202,7 @@ class Navidrome:
             if ok and song.get("albumArtists"):
                 ok = {a["name"] for a in song["albumArtists"]} == set(m["album_artists"])
             metadata_ok = ok
-            lyric_only = job_changes and all(c["kind"] == "lyrics" for c in job_changes if c["file_id"] == row["id"])
+            lyric_only = job_changes and all(c["kind"] in {"lyrics", "artwork"} for c in job_changes if c["file_id"] == row["id"])
             if lyric_only:
                 # A lyric encoding conversion must preserve the original server
                 # tags. Existing tag discrepancies (e.g. inferred album artist)
@@ -214,6 +218,13 @@ class Navidrome:
             results.append({"file_id": row["id"], "ok": ok, "detail": ("歌词任务：原服务器 ID 与标签保持一致" if lyric_only else "身份与字段已核对") if ok else "ID 或标签未对应，保留待核对；不会按同名自动迁移"})
             if ok:
                 self.store.put("identity", row["id"], {"file_id": row["id"], "server_id": song["id"], "hash": row["hash"], "at": stamp()})
+                if job_id and (row.get("published_hash") != row["hash"] or row.get("published_job") != job_id):
+                    revision = self.store.get("revision", "counter", 0) + 1
+                    self.store.put("revision", "counter", revision)
+                    row.update(published_revision=revision, published_hash=row["hash"], published_job=job_id,
+                               published_cover=song.get("coverArt", ""), published_metadata=m if metadata_ok else {},
+                               published_refs={k: song.get(k) for k in ("albumId", "artistId", "artists", "albumArtists") if song.get(k) is not None})
+                    self.store.put("track", row["id"], row)
         if job and results and all(r["ok"] for r in results):
             job["status"] = "verified"
             self.store.put("job", job_id, job)
