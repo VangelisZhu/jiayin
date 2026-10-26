@@ -29,8 +29,8 @@ jobs:
       - name: Test generated library and browser syntax
         run: |
           python -m pytest manager/tests -q --junitxml=manager-results.xml
-          node --check manager/jiayin_manager/static/app.js
-          node --check manager/jiayin_manager/static/corrections-ui.js
+          node --input-type=module --check < manager/jiayin_manager/static/app.js
+          node --input-type=module --check < manager/jiayin_manager/static/corrections-ui.js
       - name: Build NAS container
         run: docker build -t jiayin-manager:ci manager
       - uses: actions/upload-artifact@v4

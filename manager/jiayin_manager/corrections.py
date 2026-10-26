@@ -474,7 +474,7 @@ def install_corrections(app, store, library, navidrome, transport=None):
             return [service.public(i) for i in rows]
         selected = list(reversed(rows))[max(0, offset):max(0, offset) + min(100, max(1, limit))]
         return [{**{k: i[k] for k in ("id", "status", "stage", "error", "message", "review", "at") if k in i},
-                 "preview": [{"title": p["title"], "kind": p["kind"]} for p in i["preview"][:5]} for i in reversed(selected)]
+                 "preview": [{"title": p["title"], "kind": p["kind"]} for p in i["preview"][:5]]} for i in reversed(selected)]
 
     @router.get("/api/member/corrections/{item_id}")
     def item(item_id: str, request: Request):
