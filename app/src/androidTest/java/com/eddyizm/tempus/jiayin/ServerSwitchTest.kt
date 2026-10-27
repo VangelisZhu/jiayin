@@ -178,7 +178,7 @@ class ServerSwitchTest {
                 delay(100)
                 action { vm.switchServer(second) }
                 assertNull(vm.servers.value.error)
-                waitFor("B loaded") { !vm.state.value.loading && vm.state.value.library.tracks.firstOrNull()?.id == b.tracks[0].id }
+                try { waitFor("B loaded") { !vm.state.value.loading && vm.state.value.library.tracks.firstOrNull()?.id == b.tracks[0].id } } catch (e: Exception) { throw AssertionError("B state: ${vm.state.value.status}; syncing=${vm.state.value.syncing}; policy=${vm.repo.syncPolicy()}; searches=${b.searches.get()}; count=${vm.state.value.library.tracks.size}; account=${vm.repo.account == second.id}", e) }
                 delay(1800)
                 assertEquals(second.id, vm.repo.account)
                 assertEquals(b.tracks.map { it.id }, vm.state.value.library.tracks.map { it.id })

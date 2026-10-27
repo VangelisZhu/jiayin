@@ -9,6 +9,7 @@ data class PlaybackState(
     val playing: Boolean = false, val buffering: Boolean = false,
     val cause: PauseCause = PauseCause.RESTORED, val error: String? = null,
     val ready: Boolean = false, val sleepUntil: Long = 0,
+    val discoveryNotice: String? = null,
 )
 object PlaybackHub {
     fun reset() { mutable.value = PlaybackState() }

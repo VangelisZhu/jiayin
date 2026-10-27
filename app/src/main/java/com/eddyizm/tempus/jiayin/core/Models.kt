@@ -51,14 +51,18 @@ fun artistCollection(artist: ArtistRef, tracks: List<Track>, cover: String = "")
 @Keep data class QueueState(
     val entries: List<QueueEntry> = emptyList(), val index: Int = 0, val positionMs: Long = 0,
     val shuffled: Boolean = false, val repeat: Int = 0, val source: String = "播放队列", val history: List<String> = emptyList(),
+    val discovery: DiscoveryState? = null,
 ) { val current: QueueEntry? get() = entries.getOrNull(index) }
+
+@Keep data class DiscoveryState(val enabled: Boolean = true, val roundIds: List<String> = emptyList(), val recent: List<String> = emptyList(), val relaxedNotified: Boolean = false)
 
 enum class PauseCause { NONE, USER, FOCUS, HEADSET, SLEEP, NETWORK, RESTORED }
 @Keep data class ResumePolicy(val automatic: Boolean = false) {
     fun mayResume(cause: PauseCause) = automatic && cause == PauseCause.FOCUS
 }
-@Keep data class LyricLine(val timeMs: Long? = null, val original: String, val translation: String? = null)
-@Keep data class Lyrics(val songId: String, val lines: List<LyricLine>, val language: String = "", val machine: Boolean = false, val source: String = "NAS", val offsetMs: Long = 0)
+@Keep data class LyricLine(val timeMs: Long? = null, val original: String, val translation: String? = null, val originalInvalid: Boolean = false, val translationInvalid: Boolean = false)
+@Keep data class Lyrics(val songId: String, val lines: List<LyricLine>, val language: String = "", val machine: Boolean = false, val source: String = "NAS", val offsetMs: Long = 0,
+    val processingVersion: Int = 0, val issue: String? = null)
 @Keep data class LyricTrack(val language: String = "", val kind: String = "", val offsetMs: Long = 0, val lines: List<LyricLine> = emptyList())
 @Keep data class PendingOperation(val id: String, val method: String, val params: Map<String, List<String>>, val playlistId: String? = null, val localPlaylistId: String? = null)
 

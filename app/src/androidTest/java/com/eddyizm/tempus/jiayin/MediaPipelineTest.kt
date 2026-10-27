@@ -158,6 +158,9 @@ class MediaPipelineTest {
         var searchDelay = 0L
         var downloadChunkDelay = 0L
         val requests = AtomicInteger()
+        val searches = AtomicInteger()
+        var lyrics: Lyrics? = null
+        var jsonCharset: String? = null
         val streams = AtomicInteger(); val images = AtomicInteger(); val downloads = AtomicInteger()
         private val scope = UUID.randomUUID().toString()
         val tracks = supplied ?: (1..count).map { Track("pipeline-$scope-$it", "播放测试 $it", if (catalog) "示例歌手 ${it % 3}" else "家音测试", album = if (catalog) "专辑 ${it % 2}" else "", albumId = if (catalog) "album-${it % 2}" else "", artistId = if (catalog) "artist-${it % 3}" else "", duration = 30, genre = if (catalog) "风格 ${it % 2}" else "", releaseDate = if (catalog) 20200101L + it * 10000 else 0) }
@@ -175,7 +178,7 @@ class MediaPipelineTest {
         private val worker = thread(isDaemon = true, name = "media-pipeline-fixture") {
             while (!socket.isClosed) try { val client = socket.accept()
                 thread(isDaemon = true) { client.use {
-                    val reader = it.getInputStream().bufferedReader(); val request = reader.readLine()
+                    val reader = it.getInputStream().bufferedReader(); val request = reader.readLine() ?: return@use
                     var length = 0; var range = 0
                     while (true) { val line = reader.readLine(); if (line.isNullOrEmpty()) break
                         if (line.startsWith("Content-Length:", true)) length = line.substringAfter(':').trim().toInt()
@@ -190,16 +193,18 @@ class MediaPipelineTest {
                     val expected = java.security.MessageDigest.getInstance("MD5").digest(("fixture-password" + parameters["s"]).toByteArray()).joinToString("") { "%02x".format(it) }
                     val authenticated = parameters["u"] in allowedUsers && parameters["t"] == expected
                     if (request.contains("/search3") && searchDelay > 0) Thread.sleep(searchDelay)
-                    var type = "application/json"
+                    var type = "application/json" + (jsonCharset?.let { "; charset=$it" } ?: "")
                     val result: ByteArray = if (!online || !authenticated) "unavailable".toByteArray() else when {
                         request.contains("/getCoverArt") -> { images.incrementAndGet(); type = "image/png"; png }
                         request.contains("/stream") -> { streams.incrementAndGet(); type = "audio/wav"; audio }
                         request.contains("/download") -> { downloads.incrementAndGet(); type = "audio/wav"; audio }
                         else -> Gson().toJson(mapOf("subsonic-response" to when {
                             request.contains("/search3") -> {
+                                searches.incrementAndGet()
                                 val offset = Regex("songOffset=(\\d+)").find(String(body))?.groupValues?.get(1)?.toInt() ?: 0
                                 mapOf("status" to "ok", "searchResult3" to mapOf("song" to tracks.drop(offset).take(500).map { t -> Gson().toJsonTree(t).asJsonObject.apply { addProperty("coverArt", t.cover); if (t.releaseDate > 0) addProperty("year", t.releaseDate / 10000) } }))
                             }
+                            request.contains("/getLyricsBySongId") -> mapOf("status" to "ok", "lyricsList" to mapOf("structuredLyrics" to listOf(mapOf("lang" to "kor", "kind" to "original", "line" to lyrics?.lines.orEmpty().map { mapOf("start" to it.timeMs, "value" to it.original) }))))
                             request.contains("/getArtists") && !rejectMetadata -> mapOf("status" to "ok", "artists" to mapOf("index" to listOf(mapOf("artist" to tracks.distinctBy { it.artistId }.filter { it.artistId.isNotBlank() }.map { mapOf("id" to it.artistId, "name" to it.artist) }))))
                             request.contains("/getTopSongs") && !rejectMetadata -> mapOf("status" to "ok", "topSongs" to mapOf("song" to tracks.reversed()))
                             request.contains("/star") || request.contains("/unstar") -> { starCalls.incrementAndGet(); mapOf("status" to "ok") }

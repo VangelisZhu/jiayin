@@ -52,6 +52,9 @@ class JiayinRepository(val context: Context, private val fixedSession: AccountSe
     fun library(): Library = get("library", "snapshot", Library::class.java) ?: Library()
     fun listening() = list("listening", Listening::class.java).associateBy { it.id }
     fun saveLibrary(value: Library) { put("library", "snapshot", value); put("sync-meta", "last", value.syncedAt) }
+    fun syncPolicy() = LibrarySyncPolicy(settings.getInt("$account.sync-days", 30),
+        get("sync-meta", "last", java.lang.Long::class.java)?.toLong() ?: 0L,
+        get("sync-meta", "failed", java.lang.Long::class.java)?.toLong() ?: 0L)
 
     suspend fun saveProfile(address: String, username: String, password: String, name: String = ""): ServerProfile = withContext(Dispatchers.IO) {
         val url = address.trim().trimEnd('/').toHttpUrl()
@@ -124,7 +127,7 @@ class JiayinRepository(val context: Context, private val fixedSession: AccountSe
             if (response.code >= 500) throw java.io.IOException("服务器暂时不可用（HTTP ${response.code}）")
             if (response.code == 401 || response.code == 403) throw AuthenticationRequired()
             check(response.isSuccessful) { "服务器返回 HTTP ${response.code}" }
-            val root = JsonParser.parseString(response.body?.string() ?: error("服务器返回空内容")).asJsonObject.getAsJsonObject("subsonic-response") ?: error("不是有效的 Subsonic 服务")
+            val root = JsonParser.parseString(JsonText.decode(response.body?.bytes() ?: error("服务器返回空内容"))).asJsonObject.getAsJsonObject("subsonic-response") ?: error("不是有效的 Subsonic 服务")
             if (root.getAsJsonObject("error")?.num("code") in listOf(40, 41, 42, 43, 44)) throw AuthenticationRequired()
             check(root.str("status") == "ok") { root.getAsJsonObject("error")?.str("message") ?: "接口请求失败" }
             root

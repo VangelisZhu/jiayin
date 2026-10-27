@@ -40,7 +40,7 @@ class PlayerInteractionTest {
     }
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val context get() = instrumentation.targetContext
-    @Test(timeout = 150000) fun overlayLyricsFavouritePlaylistAndDownloadBatchRegression() = runBlocking {
+    @Test(timeout = 150000) fun overlayLyricsFavouritePlaylistAndDownloadBatchRegression(): Unit = runBlocking {
         val repo = JiayinRepository.get(context)
         val component = ComponentName(context, JiayinMediaService::class.java)
         context.packageManager.setComponentEnabledSetting(component, PackageManager.COMPONENT_ENABLED_STATE_DEFAULT, PackageManager.DONT_KILL_APP)
@@ -109,6 +109,15 @@ class PlayerInteractionTest {
                 val removed = server.tracks.take(3).map { com.eddyizm.tempus.jiayin.data.AccountDownloads.requestFor(context, repo.account, it.id)!!.requestId }.toSet()
                 instrumentation.runOnMainSync { vm.removeDownloads(removed) }
                 await("batch removed from Media3 and Room", 15000) { removed.all { DownloadUtil.getDownloadManager(context).downloadIndex.getDownload(it) == null && com.eddyizm.tempus.repository.DownloadRepository().getDownload(it) == null } }
+                instrumentation.runOnMainSync { vm.start(listOf(server.tracks[3])) }
+                await("new song") { PlaybackHub.state.value.current?.id == server.tracks[3].id && vm.state.value.lyrics?.songId != song.id && !vm.state.value.lyricsBusy }
+                node(server.tracks[3].title)
+                SystemClock.sleep(500)
+                instrumentation.runOnMainSync { vm.command("pause") }
+                click("歌词")
+                node("这首歌还没有歌词")
+                click("这首歌还没有歌词")
+                node("打开歌词") // Empty/error/loading panels also have an ordinary tap target.
             } finally {
                 instrumentation.runOnMainSync { vm.command("pause"); future?.let { MediaController.releaseFuture(it) } }
                 scenario.close()

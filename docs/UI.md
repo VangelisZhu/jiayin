@@ -28,3 +28,10 @@
 左滑歌曲后确认移除；加入歌单时，已收录与只读歌单不可选。下面均为生成曲库的原生截图。
 
 <img src="screenshots/playlist-remove-confirm.png" width="240" alt="侧滑后的移除确认"/> <img src="screenshots/playlist-membership.png" width="240" alt="已收录歌单置灰与只读提示"/>
+
+
+## 无限听歌与低频更新
+
+preview.13 的签名包截图：队列中的无限续播开关，以及每 30 天／手动更新曲库。使用本机生成音频、歌手和纯色封面；README 仍仅展示三个主要页面。
+
+<img src="screenshots/infinite-queue.png" width="240" alt="无限续播队列"/> <img src="screenshots/library-update.png" width="240" alt="本地优先与低频曲库更新"/>

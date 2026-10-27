@@ -8,7 +8,23 @@ data class LyricMatch(val id: Long, val title: String, val artist: String, val a
 
 /** Conservative repair: never infer missing characters, or silently choose another recording. */
 object LyricRepairPolicy {
-    fun damaged(value: Lyrics) = value.lines.any { broken(it.original) || broken(it.translation.orEmpty()) }
+    const val PROCESSING_VERSION = 2
+    data class LineHealth(val originalBroken: Boolean, val translationBroken: Boolean)
+    data class Inspection(val rows: List<LineHealth>) {
+        val originalBroken get() = rows.any { it.originalBroken }
+        val translationBroken get() = rows.any { it.translationBroken }
+    }
+    fun inspect(value: Lyrics) = Inspection(value.lines.map { LineHealth(it.originalInvalid || broken(it.original), it.translationInvalid || broken(it.translation.orEmpty())) })
+    fun display(value: Lyrics, issue: String? = null): Lyrics {
+        val health = inspect(value)
+        return value.copy(lines = value.lines.mapIndexed { i, line ->
+            line.copy(original = if (health.rows[i].originalBroken) "此行文字异常" else line.original.removePrefix("\uFEFF"),
+                translation = if (health.rows[i].translationBroken) "此行译文异常" else line.translation?.removePrefix("\uFEFF"),
+                originalInvalid = health.rows[i].originalBroken, translationInvalid = health.rows[i].translationBroken)
+        }, processingVersion = PROCESSING_VERSION,
+            issue = issue ?: value.issue ?: if (health.originalBroken) "部分原文编码异常" else if (health.translationBroken) "部分译文编码异常，原文可正常阅读" else null)
+    }
+    fun damaged(value: Lyrics) = inspect(value).let { it.originalBroken || it.translationBroken }
     private fun broken(text: String): Boolean = text.indices.any { i ->
         val c = text[i]
         c == '\uFFFD' || (c.code < 32 && c !in "\n\r\t") ||

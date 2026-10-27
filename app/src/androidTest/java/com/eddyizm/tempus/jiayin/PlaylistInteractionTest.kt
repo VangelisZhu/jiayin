@@ -36,7 +36,7 @@ class PlaylistInteractionTest {
                 await { !vm.state.value.loading && vm.state.value.library.tracks.size == 12 }
                 val repo = vm.repo
                 val original = listOf("missing", "gesture-1", "gesture-2", "gesture-3", "gesture-2")
-                repo.saveLibrary(Library(server.tracks, listOf(MusicList("p", "Gesture list", original), MusicList("empty", "Empty list"), MusicList("readonly", "Read only", readOnly = true))))
+                repo.saveLibrary(Library(server.tracks, listOf(MusicList("p", "Gesture list", original), MusicList("empty", "Empty list"), MusicList("readonly", "Read only", readOnly = true)), syncedAt = System.currentTimeMillis()))
                 vm.refreshLocal()
                 ins.runOnMainSync { vm.start(server.tracks, source = "Generated queue") }
                 await { PlaybackHub.state.value.playing }

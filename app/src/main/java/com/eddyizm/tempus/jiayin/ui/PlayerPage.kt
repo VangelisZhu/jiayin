@@ -28,7 +28,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.input.nestedscroll.*
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -74,6 +73,8 @@ import sh.calvin.reorderable.*
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable fun FullPlayer(ui: HomeState, playback: PlaybackState, vm: JiayinViewModel, dark: Boolean, close: () -> Unit, addToPlaylist: (Track) -> Unit = {}, artist: (Track) -> Unit = {}, correct: (Track) -> Unit = {}) {
     var lyrics by rememberSaveable { mutableStateOf(false) }
+    val lyricScroll = rememberLazyListState()
+    val lyricFollow = rememberSaveable(playback.current?.id) { mutableStateOf(true) }
     var queue by rememberSaveable { mutableStateOf(false) }
     var timer by remember { mutableStateOf(false) }
     var matching by remember { mutableStateOf(false) }
@@ -114,7 +115,7 @@ import sh.calvin.reorderable.*
                     BoxWithConstraints(Modifier.fillMaxSize()) {
                         val showHint = maxHeight >= 300.dp
                         val recordSize = minOf(maxWidth - 28.dp, maxHeight - if (showHint) 44.dp else 8.dp, 390.dp).coerceAtLeast(64.dp)
-                        if (lyrics) LyricsPanel(ui, playback, vm, foreground, reduced, { matching = true }, { i, line -> correctionIndex = i; correction = line }, { lyrics = false })
+                        if (lyrics) LyricsPanel(ui, playback, vm, foreground, reduced, { matching = true }, { i, line -> correctionIndex = i; correction = line }, { lyrics = false }, lyricScroll, lyricFollow)
                         else Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                             Vinyl(visual, playback.playing, resumed && rotate, reduced, Modifier.size(recordSize).semantics { contentDescription = "打开歌词" }.clickable { lyrics = true })
                             if (showHint) Text("轻点唱片，查看歌词", Modifier.clickable { lyrics = true }.padding(12.dp), fontSize = 11.sp, color = foreground.copy(alpha = .75f))
@@ -164,7 +165,7 @@ import sh.calvin.reorderable.*
     if (matching) LyricMatchDialog(ui, vm) { matching = false }
     correction?.let { line ->
         var value by remember(line) { mutableStateOf(line.translation.orEmpty()) }
-        AlertDialog(onDismissRequest = { correction = null }, title = { Text("校正译文") }, text = { Column { Text(line.original); OutlinedTextField(value, { value = it }, Modifier.padding(top = 16.dp).fillMaxWidth(), label = { Text("简体中文译文") }, minLines = 2) } }, confirmButton = { TextButton({ ui.lyrics?.let { l -> vm.editLyrics(l.copy(lines = l.lines.mapIndexed { i, old -> if (i == correctionIndex) old.copy(translation = value) else old })) }; correction = null }) { Text("保存") } }, dismissButton = { TextButton({ correction = null }) { Text("取消") } })
+        AlertDialog(onDismissRequest = { correction = null }, title = { Text("校正译文") }, text = { Column { Text(line.original); OutlinedTextField(value, { value = it }, Modifier.padding(top = 16.dp).fillMaxWidth(), label = { Text("简体中文译文") }, minLines = 2) } }, confirmButton = { TextButton({ ui.lyrics?.let { l -> vm.editLyrics(l.copy(lines = l.lines.mapIndexed { i, old -> if (i == correctionIndex) old.copy(translation = value, translationInvalid = false) else old })) }; correction = null }) { Text("保存") } }, dismissButton = { TextButton({ correction = null }) { Text("取消") } })
     }
 }
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
@@ -184,27 +185,25 @@ import sh.calvin.reorderable.*
     }
 }
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-@Composable fun LyricsPanel(ui: HomeState, playback: PlaybackState, vm: JiayinViewModel, color: Color, reduced: Boolean, match: () -> Unit, edit: (Int, LyricLine) -> Unit, showRecord: () -> Unit = {}) {
+@Composable fun LyricsPanel(ui: HomeState, playback: PlaybackState, vm: JiayinViewModel, color: Color, reduced: Boolean, match: () -> Unit, edit: (Int, LyricLine) -> Unit, showRecord: () -> Unit = {}, scroll: LazyListState = rememberLazyListState(), followState: MutableState<Boolean> = remember { mutableStateOf(true) }) {
     val lyrics = ui.lyrics
     var bilingual by rememberSaveable(playback.current?.id) { mutableStateOf(true) }
-    var follow by remember(playback.current?.id) { mutableStateOf(true) }
-    val scroll = rememberLazyListState()
+    var follow by followState
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
     var armed by remember(playback.current?.id) { mutableStateOf(false) }
     var target by remember(playback.current?.id) { mutableIntStateOf(-1) }
     var seekConfirmation by remember { mutableIntStateOf(-1) }
     val toggle by rememberUpdatedState(showRecord)
-    val damaged = lyrics?.let { LyricRepairPolicy.damaged(it) } == true || lyrics?.source?.startsWith("NAS 歌词编码异常") == true
-    val lines = if (damaged) emptyList() else lyrics?.lines.orEmpty()
+    val display = remember(lyrics) { lyrics?.let { LyricRepairPolicy.display(it) } }
+    val damaged = display?.issue != null
+    val lines = display?.lines.orEmpty()
     val position = playback.queue.positionMs + (lyrics?.offsetMs ?: 0)
     val current = lines.indexOfLast { it.timeMs != null && it.timeMs <= position }.coerceAtLeast(0)
     LaunchedEffect(lyrics?.songId, lyrics?.language) {
         val lang = lyrics?.language.orEmpty().lowercase()
         bilingual = !(lang.startsWith("zh") || lang.startsWith("chi") || lang == "cmn")
     }
-    val nested = remember { object : NestedScrollConnection {
-        override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset { if (source == NestedScrollSource.UserInput) follow = false; return Offset.Zero }
-    } }
     LaunchedEffect(current, follow, playback.current?.id) {
         if (follow && lines.isNotEmpty()) {
             val target = -(scroll.layoutInfo.viewportEndOffset / 3)
@@ -223,21 +222,30 @@ import sh.calvin.reorderable.*
             TextButton(match) { Text("匹配歌词", color = color, fontSize = 12.sp) }
             if (lines.isNotEmpty()) TextButton({ vm.translate() }, enabled = !ui.lyricsBusy) { Text(if (ui.lyricsBusy) "处理中…" else "翻译为中文", color = color, fontSize = 12.sp) }
         }
-        if (lines.isEmpty()) Column(Modifier.fillMaxWidth().weight(1f), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-            Text(if (ui.lyricsBusy) "正在读取和检查歌词…" else if (damaged) lyrics?.source.orEmpty().takeIf { it.startsWith("NAS 歌词编码异常") } ?: "NAS 歌词编码异常" else "这首歌还没有歌词", Modifier.padding(horizontal = 24.dp), color = color.copy(alpha = .7f), fontSize = 13.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+        if (damaged && lines.isNotEmpty()) Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(display?.issue.orEmpty(), Modifier.weight(1f).clickable(onClick = showRecord), color = color.copy(alpha = .7f), fontSize = 11.sp)
+            TextButton({ vm.loadLyrics(true) }, enabled = !ui.lyricsBusy) { Text("重试修复", color = color, fontSize = 11.sp) }
+        }
+        if (lines.isEmpty()) Column(Modifier.fillMaxWidth().weight(1f).clickable(onClickLabel = "显示唱片", onClick = showRecord), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+            Text(if (ui.lyricsBusy) "正在读取和检查歌词…" else if (damaged) display?.issue.orEmpty() else "这首歌还没有歌词", Modifier.padding(horizontal = 24.dp), color = color.copy(alpha = .7f), fontSize = 13.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
             if (damaged && vm.repo.settings.getBoolean("auto-repair-lyrics", true)) TextButton({ vm.loadLyrics(true) }, enabled = !ui.lyricsBusy) { Text("重试自动修复", color = color, fontSize = 12.sp) }
             TextButton(match) { Text("手动联网匹配", color = color) }
         } else {
-            LazyColumn(state = scroll, modifier = Modifier.weight(1f).fillMaxWidth().nestedScroll(nested).semantics { contentDescription = "歌词区域：轻点切换唱片，长按三秒后拖动并松手跳转" }.pointerInput(lines, lyrics?.offsetMs) {
+            LazyColumn(state = scroll, modifier = Modifier.weight(1f).fillMaxWidth().semantics {
+                contentDescription = "歌词区域：轻点切换唱片，长按三秒后拖动并松手跳转"
+                customActions = listOf(CustomAccessibilityAction("显示唱片") { showRecord(); true })
+            }.pointerInput(lines, lyrics?.offsetMs) {
                 awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    val wasScrolling = !follow && scroll.isScrollInProgress
                     val start = down.position
-                    var tap = true
+                    var tap = !wasScrolling
                     val ended = withTimeoutOrNull(3000) {
                         while (true) {
-                            val event = awaitPointerEvent()
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
                             val change = event.changes.firstOrNull { it.id == down.id } ?: return@withTimeoutOrNull true
-                            if (event.changes.size != 1 || change.isConsumed || (change.position - start).getDistance() > viewConfiguration.touchSlop) { tap = false; return@withTimeoutOrNull true }
+                            if (event.changes.size != 1) { tap = false; return@withTimeoutOrNull true }
+                            if ((change.position - start).getDistance() > viewConfiguration.touchSlop) { follow = false; tap = false; return@withTimeoutOrNull true }
                             if (!change.pressed) return@withTimeoutOrNull true
                         }
                         @Suppress("UNREACHABLE_CODE") true
@@ -245,6 +253,7 @@ import sh.calvin.reorderable.*
                     if (ended != null) { if (tap) toggle() }
                     else {
                         armed = true; follow = false
+                        haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
                         var dragged = false
                         try {
                             while (true) {
@@ -318,6 +327,11 @@ import sh.calvin.reorderable.*
                 Column(Modifier.weight(1f)) { Text("播放队列", fontSize = 24.sp, fontWeight = FontWeight.SemiBold); Text("${entries.size} 首 · ${if (playback.queue.shuffled) "随机播放" else "顺序播放"}", fontSize = 12.sp) }
                 TextButton({ vm.command("reshuffle") }) { Text("重新随机") }
             }
+            Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("无限续播", Modifier.weight(1f))
+                Switch(playback.queue.discovery?.enabled == true, { enabled -> vm.command("discovery") { putBoolean("enabled", enabled) } })
+            }
+            playback.discoveryNotice?.let { Text(it, Modifier.padding(horizontal = 24.dp, vertical = 6.dp), fontSize = 12.sp) }
             LazyColumn(state = scroll, contentPadding = PaddingValues(bottom = 30.dp)) {
                 itemsIndexed(entries, key = { _, e -> e.key }) { i, entry ->
                     ReorderableItem(reorder, key = entry.key) { _ ->

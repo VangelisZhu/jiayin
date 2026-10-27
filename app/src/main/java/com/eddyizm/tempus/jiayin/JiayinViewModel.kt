@@ -35,6 +35,7 @@ data class HomeState(
     val recommendations: List<Recommendation> = emptyList(), val downloads: List<DownloadInfo> = emptyList(),
     val pending: Int = 0, val uncertain: Int = 0, val connection: String = "尚未测试连接", val message: String? = null, val lyrics: Lyrics? = null,
     val lyricsBusy: Boolean = false, val lyricMatches: List<LyricMatch> = emptyList(),
+    val syncing: Boolean = false,
 )
 @androidx.annotation.OptIn(UnstableApi::class)
 class JiayinViewModel(app: Application) : AndroidViewModel(app) {
@@ -72,7 +73,9 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
     private var downloadEpoch = 0L
     private val artistRequests = mutableSetOf<String>()
     private var discoveryJob: Job? = null
+    private var syncJob: Job? = null
     private var lastCorrectionCheck = 0L
+    private var lastOutboxCheck = 0L
     var selectedCollection: MusicList? = null
     var searchOrigin: SearchReturnLocation? = null
     init {
@@ -96,9 +99,9 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 DownloadUtil.getDownloadManager(getApplication())
             }
-            refreshLocal(); if (repo.configured && !repo.offline) mutable.update { it.copy(loading = true) }
+            refreshLocal()
             refreshServers()
-            if (repo.configured) { connect(); if (!repo.offline) sync() } else mutable.update { it.copy(loading = false) }
+            if (repo.configured) foreground() else mutable.update { it.copy(loading = false) }
         } catch (e: CancellationException) { throw e }
         catch (e: Exception) { mutable.update { it.copy(loading = false, preparationError = "本地下载准备未完成：${e.message ?: "请检查手机剩余空间"}") } }
     }
@@ -238,19 +241,43 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
         repo = JiayinRepository.get(getApplication()).scoped(); lyricsRepo = LyricsRepository(repo)
         sessionJob = SupervisorJob(viewModelScope.coroutineContext[Job]); refreshNumber++
         artistRequests.clear(); selectedCollection = null; searchOrigin = null; batch = 0
+        lastOutboxCheck = 0; lastCorrectionCheck = 0
         folderRequest.value = BrowseLocation(); playerRequests.value = 0
         searchMutable.value = SearchUiState(); mutable.value = HomeState(configured = repo.configured)
         withContext(Dispatchers.IO) { repo.bindUpstream() }
         PlaybackHub.reset(); SessionGate.clear(); frozen = false
         sessionMutable.value++
-        refreshLocal(); if (repo.configured && !repo.offline) mutable.update { it.copy(loading = true) }; refreshServers()
-        if (repo.configured) { connect(); if (!repo.offline) sync() else mutable.update { it.copy(connection = "离线曲库 · 仅使用本地数据与下载") } }
+        refreshLocal(); refreshServers()
+        if (repo.configured) { foreground(); if (repo.offline) mutable.update { it.copy(connection = "离线曲库 · 仅使用本地数据与下载") } }
     }
-    fun sync() = task {
-        mutable.update { it.copy(loading = true, status = "正在同步曲库") }
-        try { repo.synchronize { progress -> mutable.update { it.copy(status = progress) } }; if (!repo.vault.get("${repo.account}.manager-member").isNullOrBlank()) runCatching { ManagerCorrections(repo).refresh() }; refreshLocal(); mutable.update { it.copy(connection = "已连接 NAS") }; message("曲库已同步") }
-        catch (e: Exception) { mutable.update { it.copy(connection = "暂时离线 · 使用手机上的曲库与下载") }; throw e }
-        finally { mutable.update { it.copy(loading = false) } }
+    private fun autoSync() { if (!frozen && repo.configured && !repo.offline) sync(automatic = true) }
+    fun sync(automatic: Boolean = false): Job {
+        syncJob?.takeIf { it.isActive }?.let { return it }
+        val fixedRepo = repo
+        return task {
+            if (!fixedRepo.currentSession() || fixedRepo.offline) return@task
+            if (automatic) {
+                val due = withContext(Dispatchers.IO) { fixedRepo.syncPolicy().due(System.currentTimeMillis()) }
+                if (!due) return@task
+                val manager = getApplication<Application>().getSystemService(android.net.ConnectivityManager::class.java)
+                if (manager.activeNetwork == null) return@task
+            }
+            mutable.update { it.copy(loading = true, syncing = true, status = "正在更新曲库") }
+            try {
+                fixedRepo.synchronize { progress -> if (fixedRepo.currentSession()) mutable.update { it.copy(status = progress) } }
+                withContext(Dispatchers.IO) { fixedRepo.dao.delete(fixedRepo.account, "sync-meta", "failed") }
+                if (!fixedRepo.vault.get("${fixedRepo.account}.manager-member").isNullOrBlank()) {
+                    try { ManagerCorrections(fixedRepo).refresh() } catch (e: CancellationException) { throw e } catch (_: Exception) { /* Optional metadata does not invalidate a complete library. */ }
+                }
+                refreshLocal(); mutable.update { it.copy(connection = "已连接 NAS", status = "曲库已更新") }
+                if (!automatic) message("曲库已更新")
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                withContext(Dispatchers.IO) { fixedRepo.put("sync-meta", "failed", System.currentTimeMillis()) }
+                mutable.update { it.copy(connection = "更新失败 · 保留上次曲库", status = "更新失败：${e.message ?: "请检查连接"}") }
+                if (!automatic) throw e
+            } finally { if (fixedRepo.currentSession()) mutable.update { it.copy(loading = false, syncing = false) } }
+        }.also { syncJob = it }
     }
     fun refreshCorrections() = task {
         val scoped = repo.scoped()
@@ -278,18 +305,26 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
     fun foreground() {
         if (!frozen && repo.configured) {
             connect(); if (controller != null) command("foreground")
+            autoSync()
+            if (!repo.offline && System.currentTimeMillis() - lastOutboxCheck > 30_000) {
+                lastOutboxCheck = System.currentTimeMillis()
+                task {
+                    val hasPending = withContext(Dispatchers.IO) { repo.dao.list(repo.account, "outbox").isNotEmpty() }
+                    if (hasPending) { repo.syncPending(); refreshLocal() }
+                }
+            }
             if (!repo.offline && System.currentTimeMillis() - lastCorrectionCheck > 30_000 && !repo.vault.get("${repo.account}.manager-member").isNullOrBlank()) {
                 lastCorrectionCheck = System.currentTimeMillis()
-                task { runCatching { ManagerCorrections(repo).refresh(); refreshLocal() } }
+                task { ManagerCorrections(repo).refresh(); refreshLocal() }
             }
         }
     }
-    fun start(tracks: List<Track>, shuffle: Boolean = false, source: String = "播放队列", index: Int = 0) = task {
+    fun start(tracks: List<Track>, shuffle: Boolean = false, source: String = "播放队列", index: Int = 0, discovery: DiscoveryState? = null) = task {
         if (tracks.isEmpty()) { message("这里还没有歌曲"); return@task }
         val recent = state.value.records.values.sortedByDescending { it.lastHeard }.take(100).map { it.id }.toSet()
         val queue = withContext(Dispatchers.Default) { QueueEngine.create(tracks.map { it.id }, source, shuffle, tracks.associateBy { it.id }, recent).let { if (shuffle) it else it.copy(index = index.coerceIn(0, tracks.lastIndex)) } }
         val id = UUID.randomUUID().toString()
-        withContext(Dispatchers.IO) { repo.put("command", id, queue) }
+        withContext(Dispatchers.IO) { repo.put("command", id, queue.copy(discovery = discovery)) }
         command("start") { putString("id", id) }
     }
     fun favorite(track: Track) = task { withContext(Dispatchers.IO) { repo.favorite(repo.library().tracks.find { it.id == track.id } ?: track) }; refreshLocal(); command("refresh-favorites"); repo.syncPending(); refreshLocal() }
@@ -297,13 +332,15 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
         if (discoveryJob?.isActive == true) return
         discoveryJob = task {
             val snapshot = withContext(Dispatchers.IO) { Triple(repo.library(), repo.listening(), repo.get("discovery", "recent", Array<String>::class.java)?.toList().orEmpty()) }
-            val picks = withContext(Dispatchers.Default) { DiscoveryEngine.pick(snapshot.first, snapshot.second, System.nanoTime(), snapshot.third) }
+            val eligible = if (repo.offline) snapshot.first.copy(tracks = snapshot.first.tracks.filter { AccountDownloads.downloaded(getApplication(), repo.account, it.id) }) else snapshot.first
+            val result = withContext(Dispatchers.Default) { DiscoveryEngine.extend(eligible, snapshot.second, DiscoveryState(recent = snapshot.third), emptyList(), emptySet(), System.nanoTime(), 30) }
+            val picks = result.picks
             if (picks.isEmpty()) { message("没有更多未收藏、未加入歌单的歌曲了"); return@task }
             val byId = snapshot.first.tracks.associateBy { it.id }
             withContext(Dispatchers.IO) { repo.put("discovery", "recent", (snapshot.third + picks.map { it.id }).takeLast(150)) }
             mutable.update { it.copy(recommendations = picks) }
-            start(picks.mapNotNull { byId[it.id] }, source = "随便听听 · 偏好探索").join()
-            message("已挑选 ${picks.size} 首新发现；相邻 10 首歌手不重复${if (picks.size < 30) "，候选不足时保留较短队列" else ""}")
+            start(picks.mapNotNull { byId[it.id] }, source = "随便听听 · ∞", discovery = result.state.copy(relaxedNotified = result.window < 10)).join()
+            message(if (result.window < 10) "无限听歌已开启；候选较少，歌手间隔已放宽" else "无限听歌已开启 · 相邻 10 首歌手不重复")
         }
     }
     fun artistProfile(t: Track) = state.value.artists[artistKey(t)] ?: ArtistProfile(artistKey(t), t.artist)

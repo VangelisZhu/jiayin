@@ -27,7 +27,7 @@ class LyricRepairRepositoryTest {
         var requests = 0
         val repository = LyricsRepository(repo, LyricSearch { requests++; error("unexpected") }, { broken })
         val result = repository.load(track, true)!!
-        assertTrue(result.lines.isEmpty()); assertTrue(result.source.contains("手动")); assertEquals(0, requests)
+        assertEquals("此行文字异常", result.lines.single().original); assertTrue(result.issue!!.contains("手动")); assertEquals(0, requests)
         assertEquals("LRCLIB · 手动匹配", repository.select(track, match).source)
     }
     @Test fun validNasLyricsNeverRequestExternalService() = runBlocking {
@@ -45,11 +45,11 @@ class LyricRepairRepositoryTest {
         assertEquals(repaired, restarted.load(track, true)); assertEquals(1, calls)
         assertNull(repo.dao.get("other-account", "lyrics-override", track.id))
     }
-    @Test fun failedRepairHidesCorruptionThrottlesAndAllowsExplicitRetry() = runBlocking {
+    @Test fun failedRepairPreservesTimedPlaceholderThrottlesAndAllowsExplicitRetry() = runBlocking {
         var calls = 0
         val repository = LyricsRepository(repo, LyricSearch { calls++; error("HTTP 503") }, { broken })
         val result = repository.load(track)!!
-        assertTrue(result.lines.isEmpty()); assertTrue(result.source.contains("暂不可用"))
+        assertEquals(1000L, result.lines.single().timeMs); assertEquals("此行文字异常", result.lines.single().original); assertTrue(result.issue!!.contains("暂不可用"))
         assertEquals(result, repository.load(track)); assertEquals(1, calls)
         repository.load(track, true); assertEquals(2, calls)
         assertEquals(broken, repo.get("lyrics", track.id, Lyrics::class.java))
@@ -68,4 +68,31 @@ class LyricRepairRepositoryTest {
         assertEquals(existing, repository.load(track, true))
         assertEquals(existing, repo.get("lyrics-override", track.id, Lyrics::class.java))
     }
+    @Test fun damagedTranslationDoesNotHideOrReplaceKoreanOriginal() = runBlocking {
+        val korean = Lyrics(track.id, listOf(LyricLine(500, "안녕하세요", "坏\uFFFD"), LyricLine(1500, "한국어", "中文")), "kor")
+        var calls = 0
+        val result = LyricsRepository(repo, LyricSearch { calls++; emptyList() }, { korean }).load(track, true)!!
+        assertEquals("안녕하세요", result.lines[0].original)
+        assertEquals("此行译文异常", result.lines[0].translation)
+        assertEquals("中文", result.lines[1].translation)
+        assertEquals(0, calls)
+    }
+    @Test fun oldBadCacheIsRecheckedButGoodTranslationAndOffsetSurvive() = runBlocking {
+        repo.put("lyrics", track.id, broken.copy(offsetMs = 750))
+        val good = Lyrics(track.id, listOf(LyricLine(1000, "한국어")), "kor")
+        repo.put("translation", "${LyricsEngine.originalHash(good)}:ZH:manual", good.copy(lines = listOf(LyricLine(1000, "한국어", "手动译文"))))
+        val result = LyricsRepository(repo, LyricSearch { error("normal original must not trigger online lookup") }, { good }).load(track)!!
+        assertEquals("한국어", result.lines.single().original)
+        assertEquals("手动译文", result.lines.single().translation)
+        assertEquals(750L, result.offsetMs)
+    }
+    @Test fun upgradePreservesNormalCacheAndEmptyRefreshCannotEraseIt() = runBlocking {
+        repo.put("lyrics", track.id, valid)
+        var reads = 0
+        val repository = LyricsRepository(repo, LyricSearch { error("unexpected external request") }, { reads++; valid.copy(lines = emptyList()) })
+        assertEquals(valid, repository.load(track)); assertEquals(0, reads)
+        assertEquals(valid, repository.load(track, true)); assertEquals(1, reads)
+        assertEquals(valid, repo.get("lyrics", track.id, Lyrics::class.java))
+    }
+
 }

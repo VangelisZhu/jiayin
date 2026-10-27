@@ -72,6 +72,8 @@ import kotlinx.coroutines.withContext
     var managerToken by remember { mutableStateOf("") }
     var managerBusy by remember { mutableStateOf(false) }
     var cacheSize by remember { mutableLongStateOf(0L) }
+    var syncDays by remember(settingsRepo.account) { mutableIntStateOf(p.getInt("${settingsRepo.account}.sync-days", 30)) }
+    var syncOptions by remember { mutableStateOf(false) }
     val playback by PlaybackHub.state.collectAsState()
     LaunchedEffect(Unit) { withContext(Dispatchers.IO) { storedKey = !settingsRepo.vault.get("${settingsRepo.account}.deepl").isNullOrBlank(); cacheSize = DownloadUtil.getStreamingCacheSize(context) } }
     LazyColumn {
@@ -105,11 +107,23 @@ import kotlinx.coroutines.withContext
             TextButton({ settingsRepo.vault.remove("${settingsRepo.account}.deepl"); storedKey = false; apiKey = "" }) { Text("移除") }
         } }
         item { SectionTitle("连接与数据") }
-        item { Row(Modifier.padding(horizontal = 24.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { OutlinedButton({ vm.test() }) { Text("测试连接") }; OutlinedButton({ vm.sync() }) { Text("同步曲库") } } }
+        item { Row(Modifier.padding(horizontal = 24.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { OutlinedButton({ vm.test() }) { Text("测试连接") }; OutlinedButton({ vm.sync() }, enabled = !ui.syncing && !settingsRepo.offline) { Text(if (ui.syncing) "正在更新…" else "立即更新曲库") } } }
+        item { ListItem(headlineContent = { Text("自动更新曲库") }, supportingContent = { Text(if (syncDays == 0) "仅手动" else "每 $syncDays 天 · 到期后联网打开时更新") }, modifier = Modifier.clickable { syncOptions = true }) }
+        item {
+            val last = ui.library.syncedAt
+            val formatter = remember { java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault()) }
+            val next = last + syncDays * 86_400_000L
+            Text("最近成功更新：${if (last > 0) formatter.format(java.util.Date(last)) else "尚未完成"}\n下次自动更新：${when { syncDays == 0 && last > 0 -> "仅手动"; last <= 0 || next <= System.currentTimeMillis() -> "已到期，联网打开后更新"; else -> formatter.format(java.util.Date(next)) }}\n${if (ui.syncing || ui.status.startsWith("更新失败")) ui.status else "仅更新手机曲库索引，不触发 NAS 文件扫描"}", Modifier.padding(horizontal = 24.dp, vertical = 8.dp), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         item { ListItem(headlineContent = { Text("待同步操作") }, supportingContent = { Text("${ui.pending} 项${if (ui.uncertain > 0) "；其中 ${ui.uncertain} 项新建歌单结果待核对" else "；网络恢复后自动重试，也可点同步曲库。"}") }, trailingContent = { if (ui.uncertain > 0) TextButton({ retryUncertain = true }) { Text("核对") } }) }
         item { TextButton({ clear = true }, Modifier.padding(horizontal = 18.dp)) { Text("清空收听记录与推荐偏好") } }
         item { Text("开源许可：GPL-3.0。家音基于 Tempus v4.30.0；完整源码和第三方许可随安装包提供。", Modifier.padding(24.dp), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
     }
+    if (syncOptions) AlertDialog(onDismissRequest = { syncOptions = false }, title = { Text("自动更新曲库") }, text = {
+        Column { listOf(30 to "每 30 天", 14 to "每 14 天", 0 to "仅手动").forEach { (days, label) ->
+            Row(Modifier.fillMaxWidth().clickable { syncDays = days; p.edit().putInt("${settingsRepo.account}.sync-days", days).apply(); syncOptions = false }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) { RadioButton(syncDays == days, null); Text(label) }
+        } }
+    }, confirmButton = { TextButton({ syncOptions = false }) { Text("取消") } })
     if (correctionManager) CorrectionPage(vm, CorrectionTarget()) { correctionManager = false }
     if (manager) AlertDialog(onDismissRequest = { if (!managerBusy) manager = false }, title = { Text("连接 NAS 曲库管理") }, text = {
         Column(Modifier.verticalScroll(rememberScrollState())) {
