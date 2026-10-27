@@ -176,10 +176,11 @@ def audio_hash(path: Path):
     if audio is None or audio.info is None:
         raise ValueError("无法识别音频，已停止校验")
     formats = {8: ("s8", "pcm_s8"), 16: ("s16le", "pcm_s16le"), 24: ("s24le", "pcm_s24le"), 32: ("s32le", "pcm_s32le")}
-    info = audio.info if isinstance(audio, FLAC) and audio.info.bits_per_sample in formats and audio.info.md5_signature and audio.info.total_samples else None
+    info = audio.info if isinstance(audio, FLAC) and audio.info.bits_per_sample in formats else None
+    tolerant = bool(info and info.md5_signature and info.total_samples)
     raw_format, codec = formats[info.bits_per_sample] if info else ("s32le", "pcm_s32le")
     executable = os.getenv("JIAYIN_FFMPEG", "ffmpeg")
-    process = subprocess.Popen([executable, "-v", "error", "-nostdin", *([] if info else ["-xerror"]), "-i", str(path), "-map", "0:a:0", "-vn", "-f", raw_format, "-acodec", codec, "-"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    process = subprocess.Popen([executable, "-v", "error", "-nostdin", *([] if tolerant else ["-xerror"]), "-i", str(path), "-map", "0:a:0", "-vn", "-f", raw_format, "-acodec", codec, "-"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     timed_out = __import__("threading").Event()
     def stop():
         timed_out.set()
@@ -201,9 +202,11 @@ def audio_hash(path: Path):
             raise ValueError("音频完整性校验超时或被中断")
         if info:
             expected = info.total_samples * info.channels * (info.bits_per_sample // 8)
-            if length != expected or int(checksum.hexdigest(), 16) != info.md5_signature:
+            # Some decoders return zero even for a truncated final frame. A missing
+            # MD5 must not disable the independent STREAMINFO sample-count check.
+            if (info.total_samples and length != expected) or (info.md5_signature and int(checksum.hexdigest(), 16) != info.md5_signature):
                 raise ValueError("FLAC 完整采样或内置校验值不一致")
-        elif result != 0:
+        if not tolerant and result != 0:
             raise ValueError("音频完整性验证失败")
     finally:
         timeout.cancel()

@@ -51,3 +51,13 @@ def test_mismatched_or_unverifiable_flac_never_passes_tolerant_validation(flac, 
     path.write_bytes(raw)
     with pytest.raises(ValueError):
         audio_hash(path)
+
+
+@pytest.mark.parametrize("bits", [16, 24])
+def test_complete_flac_without_optional_md5_still_preserves_audio_hash(flac, bits):
+    path = flac(bits)
+    expected = audio_hash(path)
+    raw = bytearray(path.read_bytes())
+    raw[26:42] = b"\0" * 16
+    path.write_bytes(raw)
+    assert audio_hash(path) == expected
