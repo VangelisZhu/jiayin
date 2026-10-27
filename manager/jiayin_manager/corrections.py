@@ -66,6 +66,7 @@ class CorrectionService:
         self.sources = MusicSources(store, transport)
         self.lock = threading.RLock()
         self.execution = threading.Lock()
+        self.active_item = None
         self.stopped = threading.Event()
         latest = max((r.get("published_revision", 0) for r in store.all("track")), default=0)
         if latest > store.get("revision", "counter", 0):
@@ -129,10 +130,28 @@ class CorrectionService:
             self.remote(actor["member"]["username"], a["token"], a["salt"], "getSong", {"id": server_id})
         return rows[0]
 
-    @staticmethod
-    def public(item):
+    def public(self, item):
         # No paths, file journal, tokens or raw identities leave the client boundary.
-        return {k: v for k, v in item.items() if k not in {"file_ids", "device_digest"}}
+        value = {k: v for k, v in item.items() if k not in {"file_ids", "device_digest"}}
+        job = self.store.get("job", item.get("job_id", ""))
+        if job:
+            results = job.get("results", {})
+            value["progress"] = {"total": len(job["ids"]), "completed": sum(bool(r.get("ok")) for r in results.values()),
+                                 "failed": sum(not r.get("ok") for r in results.values())}
+            # A completed file job is authoritative even if its parent response was interrupted.
+            if value["status"] == "executing" and self.active_item != item["id"] and job["status"] in {"failed", "paused", "awaiting_scan"}:
+                # A newly-created job is initially paused before run() acquires the writer.
+                if job["status"] != "paused" or results:
+                    value["status"] = job["status"]
+            if value["status"] == "failed":
+                value["error"] = value.get("error") or self.job_error(job)
+                value["stage"] = "执行失败，已停止本次修改"
+        return value
+
+    @staticmethod
+    def job_error(job):
+        errors = list(dict.fromkeys(r.get("error", "文件修改未完成") for r in job.get("results", {}).values() if not r.get("ok")))
+        return "；".join(errors[:3])[:1000] or "文件任务未完成，请在任务与回退页面核对"
 
     def preview(self, body, actor):
         self.writable(actor)
@@ -263,9 +282,11 @@ class CorrectionService:
     def execute(self, item_id):
         if not self.execution.acquire(blocking=False):
             return
+        self.active_item = item_id
         try:
             self._execute(item_id)
         finally:
+            self.active_item = None
             self.execution.release()
 
     def _execute(self, item_id):
@@ -280,6 +301,8 @@ class CorrectionService:
                 return
             item["status"] = "executing"
             item["stage"] = "检查权限与文件版本"
+            item.pop("error", None)
+            item.pop("message", None)
             self.store.put("correction", item_id, item)
         try:
             with self.lib.operation:
@@ -303,6 +326,11 @@ class CorrectionService:
             self.lib.run(item["job_id"])
             job = self.store.get("job", item["job_id"])
             item["status"] = "awaiting_scan" if job["status"] == "awaiting_scan" else job["status"]
+            item.pop("error", None)
+            item.pop("message", None)
+            if item["status"] == "failed":
+                item["stage"] = "执行失败，已停止本次修改"
+                item["error"] = self.job_error(job)
             if item["status"] == "awaiting_scan":
                 item["stage"] = "文件写入完成，等待服务器扫描与核对"
                 try:
@@ -311,9 +339,9 @@ class CorrectionService:
                     item["next_check"] = stamp() + 5
                 except (ValueError, httpx.HTTPError):
                     item["message"] = "文件已写入，等待管理员启动扫描并核对"
-            item.pop("error", None)
         except Exception as exc:
             item["status"] = "failed"
+            item["stage"] = "执行失败，已停止本次修改"
             item["error"] = str(exc) if isinstance(exc, ValueError) else "执行未完成，请管理员检查后重试"
         self.store.put("correction", item_id, item)
 
@@ -472,7 +500,7 @@ def install_corrections(app, store, library, navidrome, transport=None):
         rows = [i for i in store.all("correction") if not actor or i["member_id"] == actor["member"]["id"]]
         if not actor:
             return [service.public(i) for i in rows]
-        selected = list(reversed(rows))[max(0, offset):max(0, offset) + min(100, max(1, limit))]
+        selected = [service.public(i) for i in list(reversed(rows))[max(0, offset):max(0, offset) + min(100, max(1, limit))]]
         return [{**{k: i[k] for k in ("id", "status", "stage", "error", "message", "review", "at") if k in i},
                  "preview": [{"title": p["title"], "kind": p["kind"]} for p in i["preview"][:5]]} for i in reversed(selected)]
 

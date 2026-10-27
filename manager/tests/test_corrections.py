@@ -150,6 +150,62 @@ def test_preview_conflict_never_overwrites_external_change(setup):
     assert app.state.store.get("track", rows[0]["id"])["metadata"]["title"] != "Corrected"
 
 
+@pytest.mark.parametrize("bad_stage", ["source", "temporary"])
+def test_failed_audio_validation_is_reported_to_admin_and_member_without_replacing_source(setup, monkeypatch, bad_stage):
+    app, admin, root, rows = setup
+    client, _ = pair(app, admin)
+    original = (root / rows[0]["path"]).read_bytes()
+    item = client.post("/api/member/corrections/preview", json={"ids": ["s1"], "values": {"title": "Corrected"}}).json()
+    client.post("/api/member/corrections/" + item["id"] + "/submit")
+    app.state.navidrome.capture = lambda: {}
+    app.state.navidrome.backup_database = lambda _: "generated"
+    def check_audio(path):
+        if (path.name.startswith(".jiayin-")) == (bad_stage == "temporary"):
+            raise ValueError("音频完整性验证失败")
+        return audio_hash(path)
+    monkeypatch.setattr("jiayin_manager.library.audio_hash", check_audio)
+    assert admin.post("/api/corrections/" + item["id"] + "/review", json={"accept": True}).status_code == 200
+    assert (root / rows[0]["path"]).read_bytes() == original
+    for who, route in [(admin, "/api/corrections"), (client, "/api/member/corrections")]:
+        result = who.get(route).json()[0]
+        assert result["status"] == "failed"
+        assert ("原音频" if bad_stage == "source" else "暂存音频") in result["error"]
+        assert "file_ids" not in result and "device_digest" not in result
+    assert not list(root.rglob(".jiayin-*"))
+
+
+def test_parent_status_reads_terminal_job_failure_and_progress_without_writes(setup):
+    app, admin, _, _ = setup
+    client, _ = pair(app, admin)
+    item = client.post("/api/member/corrections/preview", json={"ids": ["s1"], "values": {"title": "Corrected"}}).json()
+    record = app.state.store.get("correction", item["id"])
+    record.update(status="executing", job_id="generated-job", stage="正在写入")
+    app.state.store.put("correction", item["id"], record)
+    app.state.store.put("job", "generated-job", {"id": "generated-job", "ids": item["ids"], "status": "failed", "results": {item["ids"][0]: {"ok": False, "error": "音频完整性验证失败"}}})
+    result = admin.get("/api/corrections").json()[0]
+    assert result["status"] == "failed" and "音频完整性" in result["error"]
+    assert result["progress"] == {"total": 1, "completed": 0, "failed": 1}
+    assert app.state.store.get("correction", item["id"]) == record
+    assert client.get("/api/member/corrections").json()[0]["status"] == "failed"
+
+
+def test_new_paused_job_does_not_falsely_report_parent_as_paused(setup):
+    app, _, _, _ = setup
+    app.state.store.put("job", "generated", {"id": "generated", "ids": ["c"], "status": "paused", "results": {}})
+    value = app.state.corrections.public({"id": "parent", "status": "executing", "job_id": "generated"})
+    assert value["status"] == "executing"
+
+
+def test_retry_preflight_does_not_display_previous_failure_as_current_status(setup):
+    app, _, _, _ = setup
+    app.state.store.put("job", "generated", {"id": "generated", "ids": ["c"], "status": "failed", "results": {"c": {"ok": False, "error": "Previous attempt"}}})
+    service = app.state.corrections
+    service.active_item = "retry"
+    assert service.public({"id": "retry", "status": "executing", "job_id": "generated"})["status"] == "executing"
+    service.active_item = None
+    assert service.public({"id": "retry", "status": "executing", "job_id": "generated"})["status"] == "failed"
+
+
 def test_one_source_failure_other_succeeds_and_translation(setup):
     app, _, _, _ = setup
     def source(request):

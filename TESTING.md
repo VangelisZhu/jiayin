@@ -164,3 +164,13 @@ OPPO、小米、vivo、三星、华为等品牌尚未逐台真机验证；模拟
 复现：先构建并安装调试 APK 与 androidTest APK，再逐类执行；每类前 `adb shell am force-stop org.homemusic.player.debug`，随后运行 `adb shell am instrument -w -e class com.eddyizm.tempus.jiayin.PlaylistMutationTest org.homemusic.player.debug.test/androidx.test.runner.AndroidJUnitRunner`（替换类名）。Tempus 变体包名为 `org.homemusic.player.cast.debug`。
 
 测试仅连接本机生成服务，没有访问个人 NAS、改动真实音乐或调用付费服务。多客户端同时写歌单缺少服务器原子版本锁；检测到顺序或结果冲突时保留提示并停止该歌单修改，需明确确认重新载入。不能将测试通过解释为所有跨设备竞争均可自动解决。
+
+
+### 审核执行状态修复（后台 preview.11.2）
+
+- Linux amd64 容器内 98 项后台测试通过。7 项真实网页模块交互测试通过；Windows 的格式集成测试需另装 FFmpeg，完整格式结果以 Linux 容器为准。
+- 审核页每五秒刷新，读请求未结束、执行操作、弹窗打开或页面隐藏时不重复轮询；退出页面继续取消旧读取，已提交写操作不被取消。
+- 审核记录汇总关联文件任务的完成数量与具体失败原因；旧失败记录也能展示错误。中断的父记录可从终态文件任务读取真实失败状态，读取本身不重放任务或修改文件。
+- 原音频与暂存音频校验失败提供不同的可操作提示；生成测试确认两种失败均不会替换原文件，不会留下未登记的暂存文件。
+- FLAC 具有有效 STREAMINFO 校验值时，按原位深完整解码，核对采样数量和内置 PCM MD5，再比较修改前后的 SHA-256 音频摘要；仅附加非音频数据而造成解码器报错的兼容文件可通过，真实截断、采样数不符、校验值不符或无校验值的损坏文件仍阻止写入。16/24 位生成 FLAC 与标签回读均有覆盖。校验格式依据 [RFC 9639](https://www.rfc-editor.org/rfc/rfc9639.html)。
+- 本补丁仅更新管理后台，不修改 Android 安装包，服务重启不会自动重试已有失败申请。部署前先备份，检查没有活动写入任务；成员、设备、凭据与审核记录继续保留。

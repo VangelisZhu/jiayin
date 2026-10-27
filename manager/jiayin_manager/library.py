@@ -365,7 +365,10 @@ class LibraryManager:
                 raise ValueError("音乐目录暂存空间不足")
             try:
                 if change["kind"] in {"tags", "artwork"}:
-                    before_audio = audio_hash(path)
+                    try:
+                        before_audio = audio_hash(path)
+                    except ValueError as exc:
+                        raise ValueError("原音频解码校验失败，已停止本次写入；请检查或更换音源后重试") from exc
                     shutil.copy2(path, temporary)
                     if change["kind"] == "tags":
                         write_metadata(temporary, change["values"])
@@ -377,7 +380,11 @@ class LibraryManager:
                         if not cover.is_file() or sha(cover) != asset:
                             raise ValueError("封面暂存缺失或校验失败")
                         write_artwork(temporary, cover.read_bytes())
-                    if audio_hash(temporary) != before_audio:
+                    try:
+                        after_audio = audio_hash(temporary)
+                    except ValueError as exc:
+                        raise ValueError("暂存音频解码校验失败，已阻止替换原文件") from exc
+                    if after_audio != before_audio:
                         raise ValueError("标签修改影响了音频，已阻止写入")
                     actual, _ = read_metadata(temporary)
                     if any(actual[k] != v for k, v in change["values"].items()):

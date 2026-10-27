@@ -167,15 +167,43 @@ def audio_hash(path: Path):
                 return digest.hexdigest()
         except wave.Error:
             pass  # Compressed WAV is validated by ffmpeg instead.
+    # RFC 9639 STREAMINFO authenticates all decoded, signed little-endian samples.
+    # Some playable FLAC containers have non-audio trailing data which ffmpeg treats
+    # as a bad packet. Accept that only when both the complete sample count and the
+    # embedded PCM MD5 match. Never use tolerant decoding without those guarantees.
+    from mutagen.flac import FLAC
+    audio = mutagen.File(path)
+    if audio is None or audio.info is None:
+        raise ValueError("无法识别音频，已停止校验")
+    formats = {8: ("s8", "pcm_s8"), 16: ("s16le", "pcm_s16le"), 24: ("s24le", "pcm_s24le"), 32: ("s32le", "pcm_s32le")}
+    info = audio.info if isinstance(audio, FLAC) and audio.info.bits_per_sample in formats and audio.info.md5_signature and audio.info.total_samples else None
+    raw_format, codec = formats[info.bits_per_sample] if info else ("s32le", "pcm_s32le")
     executable = os.getenv("JIAYIN_FFMPEG", "ffmpeg")
-    process = subprocess.Popen([executable, "-v", "error", "-nostdin", "-xerror", "-i", str(path), "-map", "0:a:0", "-vn", "-f", "s32le", "-acodec", "pcm_s32le", "-"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    timeout = __import__("threading").Timer(max(60, read_metadata(path)[1] * 3 + 30), process.kill)
+    process = subprocess.Popen([executable, "-v", "error", "-nostdin", *([] if info else ["-xerror"]), "-i", str(path), "-map", "0:a:0", "-vn", "-f", raw_format, "-acodec", codec, "-"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    timed_out = __import__("threading").Event()
+    def stop():
+        timed_out.set()
+        process.kill()
+    timeout = __import__("threading").Timer(max(60, audio.info.length * 3 + 30), stop)
     timeout.start()
     digest = hashlib.sha256()
+    checksum, length = hashlib.md5(), 0
+    if info:
+        digest.update(f"FLAC:{info.channels}:{info.bits_per_sample}:{info.sample_rate}:".encode())
     try:
         for chunk in iter(lambda: process.stdout.read(1024 * 1024), b""):
             digest.update(chunk)
-        if process.wait(timeout=30) != 0:
+            if info:
+                checksum.update(chunk)
+                length += len(chunk)
+        result = process.wait(timeout=30)
+        if timed_out.is_set() or result < 0:
+            raise ValueError("音频完整性校验超时或被中断")
+        if info:
+            expected = info.total_samples * info.channels * (info.bits_per_sample // 8)
+            if length != expected or int(checksum.hexdigest(), 16) != info.md5_signature:
+                raise ValueError("FLAC 完整采样或内置校验值不一致")
+        elif result != 0:
             raise ValueError("音频完整性验证失败")
     finally:
         timeout.cancel()

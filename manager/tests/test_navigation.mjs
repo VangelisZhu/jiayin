@@ -112,6 +112,21 @@ test('repeated clicks submit one action and restore the button after completion'
  assert.equal(button.disabled,false);assert.equal(b.h.state.actionPending,0);
 });
 
+test('corrections poll terminal failures and remain guarded during dialogs and actions',async()=>{
+ const b=await browser();const gate=deferred();
+ b.routes.set('corrections',{gate,value:[{id:'generated',username:'Generated',status:'executing',preview:[],stage:'检查文件'}]});
+ b.h.state.page='corrections';const pending=b.h.render();const before=b.calls.length;
+ b.intervals[0]();assert.equal(b.calls.length,before);
+ gate.resolve();await pending;assert.match(b.app.textContent,/正在执行/);
+ b.routes.set('corrections',{value:[{id:'generated',username:'Generated',status:'failed',preview:[],error:'原音频解码校验失败',progress:{total:1,completed:0,failed:1}}]});
+ b.drawer.open=true;b.intervals[0]();assert.equal(b.calls.length,before);
+ b.drawer.open=false;b.h.state.actionPending=1;b.intervals[0]();assert.equal(b.calls.length,before);
+ b.h.state.actionPending=0;b.intervals[0]();await flush();
+ assert.match(b.app.textContent,/执行失败/);assert.match(b.app.textContent,/原音频解码校验失败/);
+ assert.match(b.app.textContent,/已完成 0 \/ 1 项 · 1 项失败/);
+ assert.doesNotMatch(b.app.textContent,/正在执行/);
+});
+
 test('read timeout shows a retry view instead of leaving an inert page',async()=>{
  const b=await browser();const gate=deferred();b.routes.set('members',{gate});
  b.h.state.page='members';const pending=b.h.render().catch(e=>e);
