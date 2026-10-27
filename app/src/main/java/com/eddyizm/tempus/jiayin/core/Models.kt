@@ -43,7 +43,7 @@ fun recordingGroups(tracks: List<Track>): List<List<Track>> = tracks.groupBy {
 fun artistKey(t: Track) = t.performers().first().key
 fun artistCollection(t: Track, tracks: List<Track>) = artistCollection(t.performers().first(), tracks, t.cover)
 fun artistCollection(artist: ArtistRef, tracks: List<Track>, cover: String = "") = MusicList("artist:${artist.key}", artist.name, tracks.filter { artist.key in it.artistKeys() }.map { it.id }, cover)
-@Keep data class MusicList(val id: String, val name: String, val tracks: List<String> = emptyList(), val cover: String = "", val pending: Boolean = false)
+@Keep data class MusicList(val id: String, val name: String, val tracks: List<String> = emptyList(), val cover: String = "", val pending: Boolean = false, val readOnly: Boolean = false, val syncError: String? = null)
 @Keep data class Library(val tracks: List<Track> = emptyList(), val playlists: List<MusicList> = emptyList(), val syncedAt: Long = 0)
 @Keep data class Listening(val id: String, val heardMs: Long = 0, val completions: Int = 0, val skips: Int = 0, val lastHeard: Long = 0, val disliked: Boolean = false)
 @Keep data class Recommendation(val id: String, val reason: String)

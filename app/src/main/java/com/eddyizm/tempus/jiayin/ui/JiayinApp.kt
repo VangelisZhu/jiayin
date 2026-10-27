@@ -214,12 +214,8 @@ import kotlinx.coroutines.flow.map
             }, confirmButton = { TextButton({ artistTarget = null }) { Text("返回") } })
         }
         playlistTarget?.let { song ->
-            AlertDialog(onDismissRequest = { playlistTarget = null }, title = { Text("加入歌单") }, text = {
-                LazyColumn(Modifier.heightIn(max = 360.dp)) {
-                    item { TextButton({ newPlaylist = true }) { Text("＋ 新建歌单") } }
-                    items(ui.library.playlists, key = { it.id }) { p -> ListItem(headlineContent = { Text(p.name) }, supportingContent = { Text("${p.tracks.size} 首") }, modifier = Modifier.clickable { vm.savePlaylist(p.id, p.name, p.tracks + song.id); playlistTarget = null }) }
-                }
-            }, confirmButton = { TextButton({ playlistTarget = null }) { Text("完成") } })
+            PlaylistPicker(song, ui.library.playlists, { id, done -> vm.addTrackToPlaylist(id, song.id, done) },
+                { newPlaylist = true }, { playlistTarget = null })
         }
         if (serverUi.busy && (serverUi.blocking || !ui.configured)) androidx.compose.ui.window.Dialog(onDismissRequest = {}, properties = androidx.compose.ui.window.DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false)) {
             Surface(shape = RoundedCornerShape(24.dp)) { Row(Modifier.padding(24.dp), verticalAlignment = Alignment.CenterVertically) { CircularProgressIndicator(Modifier.size(28.dp)); Text(serverUi.status, Modifier.padding(start = 18.dp)) } }

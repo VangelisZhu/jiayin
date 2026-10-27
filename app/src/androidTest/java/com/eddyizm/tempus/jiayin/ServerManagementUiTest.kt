@@ -24,6 +24,7 @@ class ServerManagementUiTest {
     private val ins = InstrumentationRegistry.getInstrumentation()
     private val context get() = ins.targetContext
     private fun nodes(): List<AccessibilityNodeInfo> {
+        ins.uiAutomation.clearCache()
         val result = mutableListOf<AccessibilityNodeInfo>()
         val queue = ArrayDeque<AccessibilityNodeInfo>()
         ins.uiAutomation.rootInActiveWindow?.let { queue.add(it) }
@@ -76,6 +77,7 @@ class ServerManagementUiTest {
                 assertTrue(nodes().any { it.text?.contains("不删除 NAS 音乐") == true })
                 shot("04-remove"); click("取消")
                 click("添加服务器")
+                withTimeout(10000) { while (nodes().count { it.className?.toString() == "android.widget.EditText" } != 4) delay(100) }
                 assertEquals(4, nodes().count { it.className?.toString() == "android.widget.EditText" })
                 assertTrue(nodes().any { it.text?.toString() == "仅保存" })
                 shot("05-add"); click("取消")

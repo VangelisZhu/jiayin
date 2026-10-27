@@ -327,6 +327,33 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
         val tracks = state.value.library.tracks.filter { state.value.records[it.id]?.disliked != true }.sortedBy { state.value.records[it.id]?.lastHeard ?: 0 }.take(30)
         mutable.update { it.copy(recommendations = tracks.map { t -> Recommendation(t.id, if ((it.records[t.id]?.lastHeard ?: 0) == 0L) "还没有听过" else "有一阵子没听了") }) }
     }
+    fun addTrackToPlaylist(id: String, songId: String, done: (Result<PlaylistEditResult>) -> Unit) = playlistEdit(done) { it.addTrackToPlaylist(id, songId) }
+    fun removePlaylistEntry(ref: PlaylistEntryRef, done: (Result<PlaylistEditResult>) -> Unit) = playlistEdit(done) { it.removePlaylistEntry(ref) }
+    private fun playlistEdit(done: (Result<PlaylistEditResult>) -> Unit, edit: (JiayinRepository) -> PlaylistEditResult) = task {
+        val target = repo
+        var delivered = false
+        try {
+            val result = withContext(Dispatchers.IO) { edit(target) }
+            if (!target.currentSession()) return@task
+            refreshLocal(); delivered = true; done(Result.success(result))
+            if (result == PlaylistEditResult.SAVED) {
+                message("已保存，等待同步")
+                target.syncPending()
+                if (target.currentSession()) {
+                    refreshLocal()
+                    message(state.value.library.playlists.firstOrNull { it.syncError != null }?.syncError
+                        ?: if (state.value.pending > 0) "已保存，等待同步" else "歌单已同步")
+                }
+            } else if (result == PlaylistEditResult.ALREADY_PRESENT) message("这首歌已在歌单中")
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) { if (target.currentSession()) { if (!delivered) done(Result.failure(e)) else message(e.message ?: "已保存，等待同步") } }
+    }
+    fun reloadPlaylist(id: String, done: (String?) -> Unit) = task {
+        val target = repo
+        try { target.reloadPlaylist(id); if (target.currentSession()) { refreshLocal(); done(null) } }
+        catch (e: CancellationException) { throw e }
+        catch (e: Exception) { if (target.currentSession()) done(e.message ?: "重新载入失败") }
+    }
     fun savePlaylist(id: String?, name: String, tracks: List<String>) = task {
         require(name.isNotBlank()) { "歌单名称不能为空" }
         withContext(Dispatchers.IO) { repo.setPlaylist(id, name.trim(), tracks) }; refreshLocal()
@@ -407,6 +434,7 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
         mutable.update { it.copy(downloads = it.downloads.filterNot { d -> d.id in ids }) }
         message("已移除 ${ids.size} 首手机上的下载")
     }
+    fun retryPending() = task { repo.syncPending(); refreshLocal(); message(state.value.library.playlists.firstOrNull { it.syncError != null }?.syncError ?: if (state.value.pending > 0) "部分修改仍待同步" else "歌单已同步") }
     fun retryUncertainPlaylists() = task {
         withContext(Dispatchers.IO) { repo.dao.clear(repo.account, "outbox-create-attempt") }
         repo.syncPending(); refreshLocal()

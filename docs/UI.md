@@ -21,3 +21,10 @@
 以下同为 320 × 568dp、200% 字号的签名包截图，使用生成音频与纯色封面。左：preview.8，唱片被压缩且底部操作截断。中：preview.9 保留唱片及文字空间。右：preview.9 用手指上滑后完整显示播放和歌单等操作。大字号允许滚动，不强制缩小字号；顶部栏保持可用。
 
 <img src="screenshots/adaptive-before.png" width="220" alt="preview.8 大字号播放页"/> <img src="screenshots/adaptive-player.png" width="220" alt="preview.9 大字号播放页"/> <img src="screenshots/adaptive-controls.png" width="220" alt="preview.9 手指上滑后的完整播放控制"/>
+
+
+## 歌单快捷操作
+
+左滑歌曲后确认移除；加入歌单时，已收录与只读歌单不可选。下面均为生成曲库的原生截图。
+
+<img src="screenshots/playlist-remove-confirm.png" width="240" alt="侧滑后的移除确认"/> <img src="screenshots/playlist-membership.png" width="240" alt="已收录歌单置灰与只读提示"/>

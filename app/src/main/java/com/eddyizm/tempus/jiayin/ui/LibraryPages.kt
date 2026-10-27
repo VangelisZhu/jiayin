@@ -157,7 +157,14 @@ import sh.calvin.reorderable.*
 @Composable fun CollectionPage(list: MusicList, ui: HomeState, vm: JiayinViewModel, back: () -> Unit, menu: (Track) -> Unit, rename: () -> Unit, update: (MusicList) -> Unit, correct: (List<Track>) -> Unit = {}) {
     val byId = remember(ui.library.tracks) { ui.library.tracks.associateBy { it.id } }
     val tracks = list.tracks.mapNotNull { byId[it] }
-    val editable = ui.library.playlists.any { it.id == list.id }
+    val entries = remember(list.tracks, byId) { list.tracks.mapIndexedNotNull { index, id -> byId[id]?.let { index to it } } }
+    val editable = ui.library.playlists.any { it.id == list.id } && !list.readOnly
+    var removal by remember(list.id) { mutableStateOf<Pair<PlaylistEntryRef, Track>?>(null) }
+    var removing by remember(list.id) { mutableStateOf(false) }
+    var removalError by remember(list.id) { mutableStateOf<String?>(null) }
+    var reload by remember(list.id) { mutableStateOf(false) }
+    var reloading by remember(list.id) { mutableStateOf(false) }
+    var reloadError by remember(list.id) { mutableStateOf<String?>(null) }
     var editing by remember(list.id) { mutableStateOf(false) }
     var delete by remember { mutableStateOf(false) }
     var adding by remember { mutableStateOf(false) }
@@ -198,24 +205,66 @@ import sh.calvin.reorderable.*
             item {
                 Column(Modifier.padding(horizontal = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     PlaylistCover(list, ui.library.tracks, Modifier.size(172.dp)); Text(list.name, Modifier.padding(top = 20.dp), fontSize = 28.sp, fontWeight = FontWeight.SemiBold)
-                    Text("${tracks.size} 首${if (list.pending) " · 本地已保存，等待同步" else ""}", Modifier.padding(top = 10.dp, bottom = 22.dp), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("${list.tracks.size} 首${if (list.pending) " · 本地已保存，等待同步" else ""}", Modifier.padding(top = 10.dp, bottom = 22.dp), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    list.syncError?.let { problem ->
+                        Text(problem, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                        Row {
+                            TextButton({ vm.retryPending() }) { Text("重试同步") }
+                            if (!list.id.startsWith("local:")) TextButton({ reload = true }) { Text("重新载入服务器歌单") }
+                        }
+                    }
                     ActionPair(first = { m -> Button({ vm.start(tracks, source = list.name) }, m.heightIn(min = 48.dp)) { AppIcon(R.drawable.ic_play, "播放全部"); Spacer(Modifier.width(6.dp)); Text("播放全部") } },
                         second = { m -> OutlinedButton({ vm.start(tracks, true, list.name) }, m.heightIn(min = 48.dp)) { AppIcon(R.drawable.ic_shuffle, "随机播放"); Spacer(Modifier.width(6.dp)); Text("随机播放") } })
                     TextButton({ vm.download(tracks, list.takeIf { editable }) }) { AppIcon(R.drawable.ic_download, "下载"); Text("下载此歌单") }
                 }
             }
-            itemsIndexed(tracks, key = { i, t -> "$i:${t.id}" }) { i, t -> SongRow(t, i, action = { vm.start(tracks, source = list.name, index = i) }, more = { menu(t) }) }
+            itemsIndexed(entries, key = { _, entry -> "${entry.second.id}#${list.tracks.take(entry.first).count { it == entry.second.id }}" }) { i, entry ->
+                val (rawIndex, t) = entry
+                var actions by remember { mutableStateOf(false) }
+                val confirm = { removalError = null; removal = list.entryRef(rawIndex) to t }
+                Box(Modifier.animateItem()) {
+                    PlaylistSwipeRow(editable && removal == null && !removing, confirm) {
+                        Box {
+                            SongRow(t, i, action = { vm.start(tracks, source = list.name, index = i) }, more = { if (editable) actions = true else menu(t) })
+                            DropdownMenu(actions, { actions = false }) {
+                                DropdownMenuItem(text = { Text("从此歌单移除") }, onClick = { actions = false; confirm() })
+                                DropdownMenuItem(text = { Text("更多歌曲操作") }, onClick = { actions = false; menu(t) })
+                            }
+                        }
+                    }
+                }
+            }
             if (tracks.isEmpty()) item { EmptyState("还没有歌曲", "从歌曲右侧菜单加入，或打开歌单管理。") }
         }
     }
+    removal?.let { (ref, song) ->
+        PlaylistRemovalDialog(list.name, song, removing, playlistVersion(list.tracks) != ref.version, removalError, {
+            removing = true
+            vm.removePlaylistEntry(ref) { outcome ->
+                removing = false
+                removalError = outcome.fold(::playlistEditError) { it.message ?: "保存失败，请重试" }
+                if (removalError == null) removal = null
+            }
+        }, { removal = null })
+        LaunchedEffect(list.tracks) { if (playlistVersion(list.tracks) != ref.version && !removing) removalError = "歌单内容已变化，请取消后重新选择歌曲" }
+    }
+    if (reload) AlertDialog(onDismissRequest = { if (!reloading) reload = false }, title = { Text("重新载入服务器歌单？") }, text = {
+        Column(Modifier.verticalScroll(rememberScrollState())) { Text("放弃此歌单尚未同步的本地修改，以服务器内容为准。其他歌单、音乐文件和播放队列不受影响。"); reloadError?.let { Text(it, color = MaterialTheme.colorScheme.error) } }
+    }, confirmButton = { TextButton({ reloading = true; vm.reloadPlaylist(list.id) { error -> reloading = false; reloadError = error; if (error == null) reload = false } }, enabled = !reloading) { Text(if (reloading) "正在载入…" else "重新载入") } }, dismissButton = { TextButton({ reload = false }, enabled = !reloading) { Text("取消") } })
     if (delete) AlertDialog(onDismissRequest = { delete = false }, title = { Text("删除“${list.name}”？") }, text = { Text("只删除歌单，音乐文件会保留。") }, confirmButton = { TextButton({ vm.deletePlaylist(list.id); delete = false; back() }) { Text("删除") } }, dismissButton = { TextButton({ delete = false }) { Text("取消") } })
     if (adding) {
         var query by remember { mutableStateOf("") }; var ids by remember { mutableStateOf(setOf<String>()) }
         AlertDialog(onDismissRequest = { adding = false }, title = { Text("选择要加入的歌曲") }, text = {
             Column { OutlinedTextField(query, { query = it }, singleLine = true, placeholder = { Text("搜索歌曲或歌手") })
-                LazyColumn(Modifier.heightIn(max = 360.dp)) { items(ui.library.tracks.filter { "$it".contains(query, true) }, key = { it.id }) { t -> Row(Modifier.clickable { ids = if (t.id in ids) ids - t.id else ids + t.id }, verticalAlignment = Alignment.CenterVertically) { Checkbox(t.id in ids, null); Column { Text(t.title, maxLines = 1); Text(t.artist, fontSize = 11.sp) } } } }
+                LazyColumn(Modifier.heightIn(max = 360.dp)) { items(ui.library.tracks.filter { "$it".contains(query, true) }, key = { it.id }) { t ->
+                    val present = t.id in editIds
+                    Row(Modifier.clickable(enabled = !present) { ids = if (t.id in ids) ids - t.id else ids + t.id }, verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(present || t.id in ids, null, enabled = !present)
+                        Column { Text(t.title, maxLines = 1, color = if (present) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface); Text(if (present) "已在歌单" else t.artist, fontSize = 11.sp) }
+                    }
+                } }
             }
-        }, confirmButton = { TextButton({ editIds = editIds + ids; adding = false }) { Text("加入 ${ids.size} 首") } }, dismissButton = { TextButton({ adding = false }) { Text("取消") } })
+        }, confirmButton = { TextButton({ editIds = PlaylistEdits.appendMissing(editIds, ids); adding = false }, enabled = ids.any { it !in editIds }) { Text("加入 ${ids.count { it !in editIds }} 首") } }, dismissButton = { TextButton({ adding = false }) { Text("取消") } })
     }
 }
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)

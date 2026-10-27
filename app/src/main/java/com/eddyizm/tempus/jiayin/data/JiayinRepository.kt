@@ -36,7 +36,8 @@ class JiayinRepository(val context: Context, private val fixedSession: AccountSe
     val settings = context.getSharedPreferences("jiayin", Context.MODE_PRIVATE)
     val vault = SecureVault(context)
     val gson = Gson()
-    val dao = LocalDatabase.get(context).rows()
+    private val database = LocalDatabase.get(context)
+    val dao = database.rows()
     val http = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS)
         .callTimeout(45, TimeUnit.SECONDS).followRedirects(false).followSslRedirects(false).build()
     private val syncMutex = Mutex()
@@ -146,14 +147,11 @@ class JiayinRepository(val context: Context, private val fixedSession: AccountSe
         }
         val playlists = request("getPlaylists").getAsJsonObject("playlists")?.objects("playlist").orEmpty().map { p ->
             val contents = request("getPlaylist", one("id", p.str("id"))).getAsJsonObject("playlist")
-            MusicList(p.str("id"), p.str("name"), contents?.objects("entry").orEmpty().map { it.str("id") }, p.str("coverArt"))
+            MusicList(p.str("id"), p.str("name"), contents?.objects("entry").orEmpty().map { it.str("id") }, p.str("coverArt"), readOnly = playlistReadOnly(contents ?: p) || playlistReadOnly(p))
         }
         // A failed remote mutation retains the optimistic local view until retry succeeds.
         val pending = list("outbox", PendingOperation::class.java)
         val local = library()
-        val pendingIds = pending.mapNotNull { it.playlistId }.toSet()
-        val mergedLists = playlists.filterNot { it.id in pendingIds } + local.playlists.filter { it.id in pendingIds || it.id.startsWith("local:") }
-        val favorites = pending.filter { (it.method == "star" || it.method == "unstar") && it.params.containsKey("id") }.associate { it.params.getValue("id").first() to (it.method == "star") }
         // Optional metadata must never prevent the song library from being synchronized.
         runCatching {
             val remoteArtists = request("getArtists").getAsJsonObject("artists")?.objects("index").orEmpty().flatMap { it.objects("artist") }
@@ -171,11 +169,23 @@ class JiayinRepository(val context: Context, private val fixedSession: AccountSe
             val previous = local.tracks.associateBy { it.id }
             songs.values.map { t -> t.copy(sharedRegion = previous[t.id]?.sharedRegion, albumVersion = t.albumVersion?.takeIf(String::isNotBlank) ?: previous[t.id]?.albumVersion) }
         }
-        Library(enhanced.map { it.copy(starred = favorites[it.id] ?: it.starred) }, mergedLists, System.currentTimeMillis()).also { saveLibrary(it) }
+        // Local edits can arrive while network/metadata requests above are in flight.
+        database.runInTransaction<Library>(java.util.concurrent.Callable {
+            check(currentSession()) { "账户已切换，请重试" }
+            val latestPending = list("outbox", PendingOperation::class.java)
+            val latest = library()
+            val protected = latestPending.mapNotNull { it.playlistId?.let(::resolvePlaylistId) }.toSet()
+            val removed = latestPending.filter { it.method == "deletePlaylist" }.mapNotNull { it.playlistId?.let(::resolvePlaylistId) }.toSet()
+            val lists = playlists.filterNot { it.id in protected || it.id in removed } + latest.playlists.filter { it.id in protected || it.id.startsWith("local:") }
+            val stars = latestPending.filter { it.method in listOf("star", "unstar") && it.params.containsKey("id") }.associate { it.params.getValue("id").first() to (it.method == "star") }
+            Library(enhanced.map { it.copy(starred = stars[it.id] ?: it.starred) }, lists, System.currentTimeMillis()).also { saveLibrary(it) }
+        })
     } }
     @Synchronized fun favorite(track: Track) {
-        val lib = library(); saveLibrary(lib.copy(tracks = lib.tracks.map { if (it.id == track.id) it.copy(starred = !track.starred) else it }))
-        enqueue(if (track.starred) "unstar" else "star", one("id", track.id))
+        database.runInTransaction {
+            val lib = library(); saveLibrary(lib.copy(tracks = lib.tracks.map { if (it.id == track.id) it.copy(starred = !track.starred) else it }))
+            enqueue(if (track.starred) "unstar" else "star", one("id", track.id))
+        }
     }
     @Synchronized fun favoriteArtist(profile: ArtistProfile) {
         val old = get("artist", profile.id, ArtistProfile::class.java) ?: profile
@@ -185,57 +195,161 @@ class JiayinRepository(val context: Context, private val fixedSession: AccountSe
     fun topSongs(name: String, ids: Set<String>): List<String> = request("getTopSongs", mapOf("artist" to listOf(name), "count" to listOf("100")))
         .getAsJsonObject("topSongs")?.objects("song").orEmpty().map { it.str("id") }.filter { it in ids }.distinct()
     @Synchronized fun setPlaylist(id: String?, name: String, ids: List<String>): MusicList {
-        val listId = id ?: "local:${UUID.randomUUID()}"
-        val lib = library(); val value = MusicList(listId, name, ids, pending = true)
-        saveLibrary(lib.copy(playlists = lib.playlists.filterNot { it.id == listId } + value))
-        enqueue("replacePlaylist", mapOf("name" to listOf(name), "songId" to ids), listId)
-        return value
+        return database.runInTransaction<MusicList>(java.util.concurrent.Callable {
+            check(currentSession()) { "账户已切换，请重试" }
+            val listId = id?.let(::resolvePlaylistId) ?: "local:${UUID.randomUUID()}"
+            val lib = library(); val old = lib.playlists.find { it.id == listId }
+            check(old?.readOnly != true) { "这是只读歌单" }
+            val value = (old ?: MusicList(listId, name)).copy(name = name, tracks = ids, pending = true, syncError = null)
+            saveLibrary(lib.copy(playlists = if (old == null) lib.playlists + value else lib.playlists.map { if (it.id == listId) value else it }))
+            enqueue("replacePlaylist", mapOf("name" to listOf(name), "songId" to ids), listId)
+            value
+        })
     }
     @Synchronized fun deletePlaylist(id: String) {
-        saveLibrary(library().let { it.copy(playlists = it.playlists.filterNot { p -> p.id == id }) })
-        enqueue("deletePlaylist", one("id", id), id)
+        database.runInTransaction {
+            check(currentSession()) { "账户已切换，请重试" }
+            val resolved = resolvePlaylistId(id)
+            check(library().playlists.find { it.id == resolved }?.readOnly != true) { "这是只读歌单" }
+            saveLibrary(library().let { it.copy(playlists = it.playlists.filterNot { p -> p.id == resolved }) })
+            enqueue("deletePlaylist", one("id", resolved), resolved)
+        }
     }
+    private fun resolvePlaylistId(id: String) = get("playlist-id", id, String::class.java) ?: id
+    private fun playlistReadOnly(p: JsonObject) = p.get("readonly")?.takeUnless { it.isJsonNull }?.asBoolean == true ||
+        p.str("owner").let { it.isNotBlank() && it != user }
+
+    fun addTrackToPlaylist(id: String, songId: String): PlaylistEditResult = editPlaylist(id) { p ->
+        if (songId in p.tracks) Triple(PlaylistEditResult.ALREADY_PRESENT, p.tracks, emptyMap())
+        else Triple(PlaylistEditResult.SAVED, p.tracks + songId, one("songId", songId))
+    }
+    fun removePlaylistEntry(ref: PlaylistEntryRef): PlaylistEditResult = editPlaylist(ref.playlistId, true) { p ->
+        val next = PlaylistEdits.remove(p.tracks, ref)
+        if (next == null) Triple(PlaylistEditResult.CHANGED, p.tracks, emptyMap())
+        else Triple(PlaylistEditResult.SAVED, next, mapOf("before" to p.tracks, "after" to next, "index" to listOf(ref.index.toString())))
+    }
+    private fun editPlaylist(id: String, remove: Boolean = false, edit: (MusicList) -> Triple<PlaylistEditResult, List<String>, Map<String, List<String>>>): PlaylistEditResult =
+        database.runInTransaction<PlaylistEditResult>(java.util.concurrent.Callable {
+            check(currentSession()) { "账户已切换，请重试" }
+            val lib = library(); val resolved = resolvePlaylistId(id)
+            val p = lib.playlists.find { it.id == resolved } ?: return@Callable PlaylistEditResult.MISSING
+            if (p.readOnly) return@Callable PlaylistEditResult.READ_ONLY
+            val (result, tracks, params) = edit(p)
+            if (result == PlaylistEditResult.SAVED) {
+                saveLibrary(lib.copy(playlists = lib.playlists.map { if (it.id == resolved) it.copy(tracks = tracks, pending = true) else it }))
+                enqueue(if (remove) "removePlaylistEntry" else "addPlaylistTrack", params, resolved)
+            }
+            result
+        })
+
     private fun enqueue(method: String, params: Map<String, List<String>>, playlist: String? = null) {
-        val id = UUID.randomUUID().toString(); put("outbox", id, PendingOperation(id, method, params, playlist))
+        // UUID ordering is not chronological when multiple edits land in one millisecond.
+        val id = UUID.randomUUID().toString()
+        val last = dao.list(account, "outbox").maxOfOrNull { it.updated } ?: 0L
+        dao.put(LocalRow().also { it.account = account; it.kind = "outbox"; it.id = id
+            it.updated = maxOf(System.currentTimeMillis(), last + 1)
+            it.payload = gson.toJson(PendingOperation(id, method, params, playlist)) })
     }
     suspend fun syncPending() = syncMutex.withLock { withContext(Dispatchers.IO) { flushOutbox() } }
     private fun flushOutbox() {
+        if (offline) return
         for (op in list("outbox", PendingOperation::class.java)) {
             try {
-                val resolved = op.playlistId?.let { get("playlist-id", it, String::class.java) ?: it }
+                val resolved = op.playlistId?.let(::resolvePlaylistId)
+                var newId: String? = null
+                var remoteTracks: List<String>? = null
                 when (op.method) {
+                    "addPlaylistTrack", "removePlaylistEntry" -> remoteTracks = syncPlaylistEdit(op, requireNotNull(resolved))
                     "replacePlaylist" -> {
                         if (resolved?.startsWith("local:") == true) {
                             val attempted = get("outbox-create-attempt", op.id, Boolean::class.java) == true
                             if (attempted) {
                                 val matches = request("getPlaylists").getAsJsonObject("playlists")?.objects("playlist").orEmpty().filter { it.str("name") == op.params["name"]?.firstOrNull() }
                                     .filter { p -> request("getPlaylist", one("id", p.str("id"))).getAsJsonObject("playlist")?.objects("entry").orEmpty().map { it.str("id") } == op.params["songId"].orEmpty() }
-                                if (matches.size != 1) break // Require explicit user resolution; no duplicate playlist.
-                                val remote = matches.single().str("id")
-                                put("playlist-id", resolved, remote)
-                                saveLibrary(library().let { l -> l.copy(playlists = l.playlists.map { if (it.id == resolved) it.copy(id = remote, pending = false) else it }) })
-                                dao.delete(account, "outbox", op.id); dao.delete(account, "outbox-create-attempt", op.id); continue
+                                check(matches.size == 1) { "新建歌单结果未确认，请先核对服务器歌单再重试" }
+                                newId = matches.single().str("id")
+                            } else {
+                                put("outbox-create-attempt", op.id, true)
+                                newId = request("createPlaylist", op.params).getAsJsonObject("playlist")?.str("id")?.takeIf { it.isNotBlank() }
+                                    ?: error("服务器未返回新歌单 ID")
                             }
-                            put("outbox-create-attempt", op.id, true)
-                            val result = request("createPlaylist", op.params)
-                            val remote = result.getAsJsonObject("playlist")?.str("id")?.takeIf { it.isNotBlank() } ?: error("服务器未返回新歌单 ID")
-                            put("playlist-id", resolved, remote)
-                            saveLibrary(library().let { l -> l.copy(playlists = l.playlists.map { if (it.id == resolved) it.copy(id = remote, pending = false) else it }) })
                         } else {
-                            // createPlaylist with playlistId replaces contents idempotently (Subsonic API).
                             request("createPlaylist", mapOf("playlistId" to listOf(resolved!!), "songId" to op.params.getValue("songId")))
                             request("updatePlaylist", mapOf("playlistId" to listOf(resolved), "name" to op.params.getValue("name")))
-                            saveLibrary(library().let { l -> l.copy(playlists = l.playlists.map { if (it.id == resolved) it.copy(pending = false) else it }) })
                         }
                     }
                     "deletePlaylist" -> if (resolved?.startsWith("local:") != true) request(op.method, one("id", resolved!!))
                     else -> request(op.method, op.params)
                 }
-                dao.delete(account, "outbox", op.id)
-                dao.delete(account, "outbox-create-attempt", op.id)
-            } catch (_: Exception) { break } // preserve ordered outbox; UI explicitly shows pending status
+                database.runInTransaction {
+                    if (newId != null) put("playlist-id", requireNotNull(resolved), requireNotNull(newId))
+                    dao.delete(account, "outbox", op.id)
+                    dao.delete(account, "outbox-create-attempt", op.id)
+                    dao.delete(account, "playlist-attempt", op.id)
+                    val target = newId ?: resolved
+                    val remaining = list("outbox", PendingOperation::class.java).any { it.playlistId?.let(::resolvePlaylistId) == target }
+                    saveLibrary(library().let { l -> l.copy(playlists = l.playlists.map { p ->
+                        if (p.id == resolved || p.id == target) p.copy(id = target ?: p.id, pending = remaining, syncError = null,
+                            tracks = if (!remaining && remoteTracks != null) remoteTracks!! else p.tracks) else p
+                    }) })
+                }
+            } catch (e: Exception) {
+                op.playlistId?.let { id -> database.runInTransaction {
+                    val resolved = resolvePlaylistId(id)
+                    saveLibrary(library().let { l -> l.copy(playlists = l.playlists.map { if (it.id == resolved) it.copy(pending = true,
+                        syncError = e.message ?: "同步失败，请重试") else it }) })
+                } }
+                break // Preserve dependency order. Never replay an uncertain positional removal.
+            }
         }
     }
+
+    private fun readRemotePlaylist(id: String): JsonObject = request("getPlaylist", one("id", id)).getAsJsonObject("playlist")
+        ?: error("服务器歌单不存在，请重新载入")
+
+    private fun syncPlaylistEdit(op: PendingOperation, id: String): List<String> {
+        val remote = readRemotePlaylist(id)
+        check(!playlistReadOnly(remote)) { "服务器不允许修改此歌单（只读或无权限）" }
+        val ids = remote.objects("entry").map { it.str("id") }
+        val attempt = get("playlist-attempt", op.id, PendingOperation::class.java)
+        val before: List<String>
+        val after: List<String>
+        val params: Map<String, List<String>>
+        if (op.method == "addPlaylistTrack") {
+            val song = op.params.getValue("songId").single()
+            if (song in ids) return ids
+            if (attempt != null) check(ids == attempt.params["before"]) { "歌单内容已变化，添加结果需核对，请重新载入" }
+            before = ids; after = ids + song
+            params = mapOf("playlistId" to listOf(id), "songIdToAdd" to listOf(song))
+        } else {
+            before = op.params.getValue("before"); after = op.params.getValue("after")
+            when (PlaylistEdits.removalState(ids, before, after)) {
+                "done" -> return ids
+                "conflict" -> error("歌单顺序已变化，已停止移除，请重新载入服务器歌单")
+            }
+            params = mapOf("playlistId" to listOf(id), "songIndexToRemove" to op.params.getValue("index"))
+        }
+        put("playlist-attempt", op.id, op.copy(params = mapOf("before" to before, "after" to after)))
+        request("updatePlaylist", params)
+        val verified = readRemotePlaylist(id).objects("entry").map { it.str("id") }
+        check(verified == after) { "服务器歌单结果与预期不同，请重新载入后核对" }
+        return verified
+    }
+
+    /** Explicitly confirmed conflict recovery; no playback/download state is changed. */
+    suspend fun reloadPlaylist(id: String) = syncMutex.withLock { withContext(Dispatchers.IO) {
+        val resolved = resolvePlaylistId(id)
+        val remote = readRemotePlaylist(resolved)
+        database.runInTransaction {
+            check(currentSession()) { "账户已切换，请重试" }
+            list("outbox", PendingOperation::class.java).filter { it.playlistId?.let(::resolvePlaylistId) == resolved }.forEach {
+                dao.delete(account, "outbox", it.id); dao.delete(account, "playlist-attempt", it.id); dao.delete(account, "outbox-create-attempt", it.id)
+            }
+            saveLibrary(library().let { l -> l.copy(playlists = l.playlists.map { if (it.id == resolved) it.copy(
+                name = remote.str("name").ifBlank { it.name }, tracks = remote.objects("entry").map { song -> song.str("id") },
+                pending = false, syncError = null, readOnly = playlistReadOnly(remote)) else it }) })
+        }
+    } }
     @Synchronized fun record(id: String, elapsedMs: Long, completed: Boolean = false, skip: Boolean = false) {
         val old = get("listening", id, Listening::class.java) ?: Listening(id)
         put("listening", id, old.copy(heardMs = old.heardMs + elapsedMs.coerceAtLeast(0), completions = old.completions + if (completed) 1 else 0,
