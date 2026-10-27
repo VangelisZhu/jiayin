@@ -598,6 +598,35 @@ def test_remote_verification_blocks_stale_or_changed_ids(env):
     assert not next(r for r in nav.verify() if r["file_id"] == row["id"])["ok"]
 
 
+@pytest.mark.parametrize("concurrent_change", ["playlist", "favorite", "wrong_id"])
+def test_metadata_verification_keeps_concurrent_user_choices_without_relaxing_identity(env, concurrent_change):
+    app, _, root = env
+    row = first(app)
+    row["server_id"] = row["baseline_server_id"] = "s1"
+    app.state.store.put("track", row["id"], row)
+    change, job = apply_one(app, {"album": "Corrected album"})
+    row = app.state.library.track(row["id"])
+    song = {"id": "wrong" if concurrent_change == "wrong_id" else "s1", "title": row["metadata"]["title"], "album": row["metadata"]["album"], "duration": row["duration"],
+            "artists": [{"name": a} for a in row["metadata"]["artists"]], "genres": [{"name": g} for g in row["metadata"]["genres"]]}
+    if concurrent_change == "favorite":
+        song["starred"] = "generated-date"
+    app.state.store.put("server-state-job", job["id"], {"songs": {"s1": {"starred": False, "play_count": 0}}, "playlists": {"p": {"ids": ["s1"]}}})
+    nav = app.state.navidrome
+    calls = []
+    def request(method, params=None):
+        calls.append(method)
+        if method == "getPlaylist":
+            return {"playlist": {"entry": [{"id": "s1"}] + ([{"id": "user-added"}] if concurrent_change == "playlist" else [])}}
+        return {"scanStatus": {"scanning": False}}
+    nav.request, nav.catalog = request, lambda: [song]
+    result = nav.verify(job["id"])[0]
+    assert result["ok"] == (concurrent_change != "wrong_id")
+    if result["ok"]:
+        assert "保留服务器当前状态" in result["detail"]
+        assert app.state.store.get("job", job["id"])["status"] == "verified"
+    assert set(calls) <= {"getScanStatus", "getPlaylist"}
+
+
 def test_lyric_verification_preserves_server_baseline_without_approving_bad_tags(env):
     app, _, root = env
     row = first(app)

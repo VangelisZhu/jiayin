@@ -180,6 +180,7 @@ class Navidrome:
         if job and job["status"] not in {"awaiting_scan", "verified"}:
             raise ValueError("请先完成文件任务，再进行服务器核对")
         job_changes = [self.store.get("change", i) for i in job["ids"]] if job else []
+        metadata_job = bool(job_changes) and all(c["kind"] in {"tags", "lyrics", "artwork"} for c in job_changes)
         before_job = self.store.get("server-before-job", job_id, {}) if job else {}
         baseline = self.store.get("server-state-job", job_id) if job_id else None
         baseline = baseline or self.store.get("server-state", "latest", {})
@@ -210,12 +211,22 @@ class Navidrome:
                 previous_song = before_job.get(row["id"]) or self.store.get("server-before", row["id"])
                 fields = ("id", "title", "album", "artist", "duration", "artists", "albumArtists", "genres", "genre")
                 ok = bool(song and previous_song and all(song.get(k) == previous_song.get(k) for k in fields))
+            user_state_changed = False
             if ok:
                 previous = baseline.get("songs", {}).get(song["id"])
-                ok = playlist_ok and (previous is None or previous["starred"] == bool(song.get("starred")) and song.get("playCount", 0) >= previous["play_count"])
+                user_state_changed = not (playlist_ok and (previous is None or previous["starred"] == bool(song.get("starred")) and song.get("playCount", 0) >= previous["play_count"]))
+                # Tag/lyric/artwork jobs never call user-state write APIs. Once the
+                # same song identity and approved fields are verified, concurrent
+                # listening, favorites or playlist edits must remain the user's
+                # current choices, rather than block publishing corrected tags.
+                if not metadata_job:
+                    ok = not user_state_changed
             row["scan_verified"] = bool(ok and metadata_ok)
             self.store.put("track", row["id"], row)
-            results.append({"file_id": row["id"], "ok": ok, "detail": ("歌词任务：原服务器 ID 与标签保持一致" if lyric_only else "身份与字段已核对") if ok else "ID 或标签未对应，保留待核对；不会按同名自动迁移"})
+            detail = ("歌词任务：原服务器 ID 与标签保持一致" if lyric_only else "身份与字段已核对") if ok else "ID 或标签未对应，保留待核对；不会按同名自动迁移"
+            if ok and user_state_changed:
+                detail += "；收藏或歌单快照有变化，保留服务器当前状态"
+            results.append({"file_id": row["id"], "ok": ok, "detail": detail})
             if ok:
                 self.store.put("identity", row["id"], {"file_id": row["id"], "server_id": song["id"], "hash": row["hash"], "at": stamp()})
                 if job_id and (row.get("published_hash") != row["hash"] or row.get("published_job") != job_id):
