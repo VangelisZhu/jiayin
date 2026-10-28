@@ -22,7 +22,7 @@ import com.eddyizm.tempus.jiayin.core.*
 }
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-@Composable fun ArtistPage(list: MusicList, ui: HomeState, vm: JiayinViewModel, back: () -> Unit, menu: (Track) -> Unit, collection: (MusicList) -> Unit, search: (SearchScope) -> Unit = {}, correct: (List<Track>) -> Unit = {}) {
+@Composable fun ArtistPage(list: MusicList, ui: HomeState, vm: JiayinViewModel, back: () -> Unit, menu: (Track) -> Unit, collection: (MusicList) -> Unit, search: (SearchScope) -> Unit = {}, organize: (List<Track>) -> Unit = {}, correct: (List<Track>) -> Unit = {}) {
     val byId = remember(ui.library.tracks) { ui.library.tracks.associateBy { it.id } }
     val tracks = list.tracks.mapNotNull { byId[it] }
     val first = tracks.firstOrNull()
@@ -44,6 +44,7 @@ import com.eddyizm.tempus.jiayin.core.*
         FlowRow(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
             TextButton({ classification = true }) { Text("设置歌手分类") }
             TextButton({ sortingName = true }) { Text("设置排序名") }
+            TextButton({ organize(tracks) }) { Text("整理作品归属") }
             TextButton({ correct(tracks) }) { Text("纠正作品资料") }
             TextButton({ vm.start(ordered, true, list.name) }) { Text("随机播放") }
         }

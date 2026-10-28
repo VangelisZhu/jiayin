@@ -56,14 +56,16 @@ object DirectoryRegions {
 class LibraryIndex private constructor(
     val tracks: Map<String, Track>, val artists: List<ArtistEntry>, val folders: Map<String, FolderNode>,
     val folderOrder: List<String>, val regions: Map<String, String>, val documents: List<SearchDocument>,
+    val ownership: Map<String, ArtistRef> = emptyMap(),
 ) {
     private val artistTypes = artists.associate { it.id to it.profile.type }
     fun matchesTrack(id: String, scope: SearchScope): Boolean {
         val t = tracks[id] ?: return false
-        return (scope.artist == null || scope.artist in t.artistKeys()) &&
+        val effectiveArtists = ArtistOwnership.artists(t, ownership).map { it.key }
+        return (scope.artist == null || scope.artist in effectiveArtists) &&
             (scope.folder == null || DirectoryRegions.contains(scope.folder, DirectoryRegions.directory(t.path))) &&
             (scope.region == "全部" || regions[id] == scope.region) &&
-            (scope.artistType == "全部" || t.artistKeys().any { artistTypes[it] == scope.artistType })
+            (scope.artistType == "全部" || effectiveArtists.any { artistTypes[it] == scope.artistType })
     }
     fun search(query: String, scope: SearchScope, category: SearchKind = SearchKind.ALL, cancellationCheck: () -> Unit = {}): List<SearchDocument> {
         val needle = normalizeSearch(query)
@@ -86,17 +88,17 @@ class LibraryIndex private constructor(
     fun folderRegion(path: String): String = folders[path]?.allTracks.orEmpty().mapNotNull { regions[it] }.distinct().singleOrNull() ?: "混合"
     companion object {
         val EMPTY = LibraryIndex(emptyMap(), emptyList(), emptyMap(), emptyList(), emptyMap(), emptyList())
-        fun build(library: Library, profiles: Map<String, ArtistProfile>, rules: List<PathRegionRule>, order: NameOrdering): LibraryIndex {
+        fun build(library: Library, profiles: Map<String, ArtistProfile>, rules: List<PathRegionRule>, order: NameOrdering, ownership: Map<String, ArtistRef> = emptyMap()): LibraryIndex {
             val tracks = library.tracks.distinctBy { it.id }.associateBy { it.id }
             val ruleMap = rules.associate { it.path to it.region }
             val directories = tracks.mapValues { DirectoryRegions.directory(it.value.path) }
             val pathRegions = directories.mapValues { DirectoryRegions.pathRegion(it.value, ruleMap) }
             val regions = tracks.mapValues { (id, t) ->
-                val explicit = t.artistKeys().mapNotNull { profiles[it]?.region?.takeUnless { r -> r == "未分类" || r.isBlank() } }.distinct()
+                val explicit = ArtistOwnership.artists(t, ownership).mapNotNull { profiles[it.key]?.region?.takeUnless { r -> r == "未分类" || r.isBlank() } }.distinct()
                 explicit.singleOrNull() ?: DirectoryRegions.manualRegion(directories.getValue(id), ruleMap) ?:
                     t.sharedRegion?.takeIf { it in DirectoryRegions.choices && it != "全部" && it != "未分类" } ?: pathRegions.getValue(id)
             }
-            val artists = tracks.values.flatMap { t -> t.performers().map { it to t } }.groupBy { it.first.key }.map { (id, entries) ->
+            val artists = tracks.values.flatMap { t -> ArtistOwnership.artists(t, ownership).map { it to t } }.groupBy { it.first.key }.map { (id, entries) ->
                 val songs = entries.map { it.second }.distinctBy { it.id }
                 val name = entries.first().first.name
                 val profile = profiles[id] ?: ArtistProfile(id, name)
@@ -131,11 +133,11 @@ class LibraryIndex private constructor(
             val nodes = direct.mapValues { (path, ids) -> FolderNode(path, if (path == DirectoryRegions.MISSING) "未提供路径" else path.substringAfterLast('/').ifBlank { "音乐文件夹" }, path.takeIf { it.isNotBlank() }?.substringBeforeLast('/', ""), children.getValue(path).toList(), ids.toList(), all[path].orEmpty(), if (path == DirectoryRegions.MISSING) "#" else order.section(path.substringAfterLast('/'))) }
             val docs = mutableListOf<SearchDocument>()
             artists.forEach { a -> docs += SearchDocument(a.id, SearchKind.ARTISTS, a.name, "${a.tracks.size} 首 · ${a.region} · ${a.profile.type}", a.tracks.firstOrNull()?.cover.orEmpty(), a.tracks.map { it.id }, artist = a.id) }
-            tracks.values.forEach { t -> docs += SearchDocument(t.id, SearchKind.SONGS, t.title, "${t.artist} · ${t.performers().joinToString(" / ") { it.name }} · ${t.album} · ${t.genreNames().joinToString(" / ")}", t.cover, listOf(t.id), artistKey(t), directories[t.id]) }
+            tracks.values.forEach { t -> docs += SearchDocument(t.id, SearchKind.SONGS, t.title, "${t.artist} · ${t.performers().joinToString(" / ") { it.name }} · ${ArtistOwnership.artists(t, ownership).joinToString(" / ") { it.name }} · ${t.album} · ${t.genreNames().joinToString(" / ")}", t.cover, listOf(t.id), artistKey(t), directories[t.id]) }
             tracks.values.groupBy(::albumKey).forEach { (id, songs) -> val t = songs.first(); docs += SearchDocument(id, SearchKind.ALBUMS, t.album.ifBlank { "未命名专辑" }, "${t.albumCredits().joinToString(" / ") { it.name }} · ${t.albumVersion.orEmpty()} · ${songs.size} 首", t.cover, songs.sortedWith(compareBy<Track> { it.disc }.thenBy { it.number }).map { it.id }) }
             library.playlists.forEach { p -> docs += SearchDocument(p.id, SearchKind.PLAYLISTS, p.name, "${p.tracks.size} 首", p.cover, p.tracks) }
             folderOrder.forEach { path -> val f = nodes.getValue(path); docs += SearchDocument(path, SearchKind.FOLDERS, f.name, "${f.parent.orEmpty().ifBlank { "音乐文件夹" }} · ${f.allTracks.size} 首", tracks[f.allTracks.firstOrNull()]?.cover.orEmpty(), f.allTracks, folder = path) }
-            return LibraryIndex(tracks, artists, nodes, folderOrder, regions, docs)
+            return LibraryIndex(tracks, artists, nodes, folderOrder, regions, docs, ownership)
         }
         fun sectionOrder(label: String) = if (label == "#") 26 else label.firstOrNull()?.minus('A') ?: 26
         fun <T> sections(entries: List<T>, label: (T) -> String): List<IndexedSection<T>> {

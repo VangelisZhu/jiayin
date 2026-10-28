@@ -1,6 +1,6 @@
 services:
   manager:
-    image: ${JIAYIN_MANAGER_IMAGE:-jiayin-manager:0.1-preview11}
+    image: ${JIAYIN_MANAGER_IMAGE:-jiayin-manager:0.1-preview14}
     restart: unless-stopped
     ports:
       - "${BIND_IP:-127.0.0.1}:8780:8780"

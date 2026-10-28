@@ -49,6 +49,7 @@ class JiayinRepository(val context: Context, private val fixedSession: AccountSe
     fun <T> get(kind: String, id: String, type: Class<T>): T? = storage.get(kind, id, type)
     fun put(kind: String, id: String, value: Any) = storage.put(kind, id, value)
     fun <T> list(kind: String, type: Class<T>): List<T> = storage.list(kind, type)
+    fun transaction(block: () -> Unit) = database.runInTransaction(block)
     fun library(): Library = get("library", "snapshot", Library::class.java) ?: Library()
     fun listening() = list("listening", Listening::class.java).associateBy { it.id }
     fun saveLibrary(value: Library) { put("library", "snapshot", value); put("sync-meta", "last", value.syncedAt) }

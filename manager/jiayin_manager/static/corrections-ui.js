@@ -1,5 +1,6 @@
+import {initOwnership,ownershipPanels} from './ownership-ui.js?v=preview14';
 let c;
-export function initCorrections(context){c=context;}
+export function initCorrections(context){c=context;initOwnership({...context,refresh:correctionsPage});}
 export async function sourcesPage(){
  const current=c.navigationGuard();
  const {api,el,text,actions,button,shell,notice}=c;
@@ -19,8 +20,8 @@ export async function membersPage(){
 export async function correctionsPage(){
  const current=c.navigationGuard();
  const {api,el,text,actions,button,shell,badge,dialog,notice,diff,names}=c;
- const items=await api('corrections');if(!current())return;
- shell('资料纠正与审核','选择 QQ／网易云候选或手动编辑。申请不会自动写入文件；目录移动请到“分类与目录”单独审批。',el('div',{},...items.slice().reverse().map(item=>el('section',{class:'panel'},actions(el('strong',{},item.username),badge(({pending:'待审核',approved:'已批准',executing:'正在执行',draft:'待提交',failed:'执行失败',paused:'已暂停',awaiting_scan:'等待服务器核对',verified:'已完成并核对'})[item.status]||item.status)),text(item.note||'歌曲资料纠正'),item.source?text('来源：'+item.source.provider+' · '+item.source.url):null,...item.preview.map(p=>el('article',{class:'change'},el('h3',{},p.title),diff(p),p.cover?text('包括内嵌封面；不替换共用目录封面。'):null)),item.progress?text('已完成 '+item.progress.completed+' / '+item.progress.total+' 项'+(item.progress.failed?' · '+item.progress.failed+' 项失败':'')):null,item.error?text(item.error):null,item.message?text(item.message):null,item.status==='executing'&&item.stage?text(item.stage):null,item.review?text('审核说明：'+(item.review.reason||'已核对')):null,
+ const items=await api('corrections');const ownership=await ownershipPanels(current);if(!current())return;
+ shell('资料纠正与审核','选择 QQ／网易云候选或手动编辑。申请不会自动写入文件；目录移动请到“分类与目录”单独审批。',el('div',{},ownership,...items.slice().reverse().map(item=>el('section',{class:'panel'},actions(el('strong',{},item.username),badge(({pending:'待审核',approved:'已批准',executing:'正在执行',draft:'待提交',failed:'执行失败',paused:'已暂停',awaiting_scan:'等待服务器核对',verified:'已完成并核对'})[item.status]||item.status)),text(item.note||'歌曲资料纠正'),item.source?text('来源：'+item.source.provider+' · '+item.source.url):null,...item.preview.map(p=>el('article',{class:'change'},el('h3',{},p.title),diff(p),p.cover?text('包括内嵌封面；不替换共用目录封面。'):null)),item.progress?text('已完成 '+item.progress.completed+' / '+item.progress.total+' 项'+(item.progress.failed?' · '+item.progress.failed+' 项失败':'')):null,item.error?text(item.error):null,item.message?text(item.message):null,item.status==='executing'&&item.stage?text(item.stage):null,item.review?text('审核说明：'+(item.review.reason||'已核对')):null,
  actions(item.status==='draft'?button('确认并应用',async()=>{await api('corrections/'+item.id+'/submit','POST',{});notice('已提交后台任务');await correctionsPage();},true):null,item.job_id&&['failed','paused'].includes(item.status)?button('继续已批准任务',async()=>{await api('corrections/'+item.id+'/retry','POST',{});await correctionsPage();}):['pending','failed','paused'].includes(item.status)?button('审核',()=>{
   const checks=item.preview.map(p=>({p,input:el('input',{type:'checkbox',checked:true,'aria-label':p.title+' '+p.kind}),fields:Object.keys(p.values).concat(p.cover?['cover']:[]).map(key=>({key,input:el('input',{type:'checkbox',checked:true,'aria-label':p.title+' '+(names[key]||key)})}))}));
   const reason=el('textarea',{rows:3,'aria-label':'审核说明'});

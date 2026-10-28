@@ -568,6 +568,8 @@ def create_app(root=None, data=None, password=None, transport=None):
 
     from .corrections import install_corrections
     install_corrections(app, store, library, navidrome, transport)
+    from .ownership import install_ownership
+    install_ownership(app, store, library, app.state.corrections)
 
     static = Path(__file__).parent / "static"
     app.mount("/static", StaticFiles(directory=static), name="static")

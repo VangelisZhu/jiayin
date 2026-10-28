@@ -3,13 +3,13 @@ package com.eddyizm.tempus.jiayin.core
 import kotlin.random.Random
 
 object RecommendationEngine {
-    fun recommend(tracks: List<Track>, records: Map<String, Listening>, seed: Long, limit: Int = 30, from: Track? = null): List<Recommendation> {
+    fun recommend(tracks: List<Track>, records: Map<String, Listening>, seed: Long, limit: Int = 30, from: Track? = null, ownership: Map<String, ArtistRef> = emptyMap()): List<Recommendation> {
         val random = Random(seed)
         val candidates = tracks.filter { records[it.id]?.disliked != true }
         val loved = tracks.filter { it.starred || (records[it.id]?.completions ?: 0) >= 2 }
-        val artists = (loved.flatMap { it.artistKeys() } + from?.artistKeys().orEmpty()).toSet()
+        val artists = (loved.flatMap { it.recommendationArtistKeys(ownership) } + from?.recommendationArtistKeys(ownership).orEmpty()).toSet()
         val genres = (loved.flatMap { it.genreNames() } + from?.genreNames().orEmpty()).map { it.lowercase(java.util.Locale.ROOT) }.toSet()
-        fun artistMatch(t: Track) = t.artistKeys().any { it in artists }
+        fun artistMatch(t: Track) = t.recommendationArtistKeys(ownership).any { it in artists }
         fun genreMatch(t: Track) = t.genreNames().firstOrNull { it.lowercase(java.util.Locale.ROOT) in genres }
         val taste = candidates.shuffled(random).sortedByDescending {
             (if (artistMatch(it)) 6 else 0) + (if (genreMatch(it) != null) 2 else 0) + (if (it.starred) 3 else 0) - (records[it.id]?.skips ?: 0).coerceAtMost(5)
@@ -22,12 +22,12 @@ object RecommendationEngine {
             var added = 0
             for (t in list) {
                 if (selected.size >= limit || added >= count) break
-                if (t.id in selected || (!relaxed && t.artistKeys().any { (counts[it] ?: 0) >= 3 })) continue
-                selected[t.id] = Recommendation(t.id, reason(t)); t.artistKeys().forEach { counts[it] = (counts[it] ?: 0) + 1 }; added++
+                if (t.id in selected || (!relaxed && t.recommendationArtistKeys(ownership).any { (counts[it] ?: 0) >= 3 })) continue
+                selected[t.id] = Recommendation(t.id, reason(t)); t.recommendationArtistKeys(ownership).forEach { counts[it] = (counts[it] ?: 0) + 1 }; added++
             }
         }
         val tasteReason: (Track) -> String = { when {
-            from != null && it.artistKeys().any { key -> key in from.artistKeys() } -> "和这首歌有共同的演唱者"
+            from != null && it.recommendationArtistKeys(ownership).any { key -> key in from.recommendationArtistKeys(ownership) } -> "和这首歌有共同演唱者或作品归属"
             artistMatch(it) -> "来自你常听或收藏的歌手"
             it.starred -> "你收藏过这首歌"
             genreMatch(it) != null -> "你喜欢的${genreMatch(it)}类型"

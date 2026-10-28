@@ -123,8 +123,9 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
         val uncertain = withContext(Dispatchers.IO) { repo.dao.list(repo.account, "outbox-create-attempt").count { repo.dao.get(repo.account, "outbox", it.id) != null } }
         val artists = withContext(Dispatchers.IO) { repo.list("artist", ArtistProfile::class.java).associateBy { it.id } }
         val rules = withContext(Dispatchers.IO) { repo.list("folder-region", PathRegionRule::class.java) }
-        val index = withContext(Dispatchers.Default) { LibraryIndex.build(local.first, artists, rules, AndroidNameOrdering()) }
-        val recommendations = withContext(Dispatchers.Default) { RecommendationEngine.recommend(local.first.tracks, local.second, System.currentTimeMillis() / 86_400_000 + batch) }
+        val ownership = withContext(Dispatchers.IO) { OwnershipRepository(repo).effective() }
+        val index = withContext(Dispatchers.Default) { LibraryIndex.build(local.first, artists, rules, AndroidNameOrdering(), ownership) }
+        val recommendations = withContext(Dispatchers.Default) { RecommendationEngine.recommend(local.first.tracks, local.second, System.currentTimeMillis() / 86_400_000 + batch, ownership = ownership) }
         if (expected != refreshNumber) return
         mutable.update { it.copy(configured = repo.configured, loading = false, library = local.first, records = local.second, artists = artists, recommendations = recommendations, pending = local.third, uncertain = uncertain, index = index, regionRules = rules) }
         if (search.value.active) updateSearch(search.value.query)
@@ -267,7 +268,7 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
                 fixedRepo.synchronize { progress -> if (fixedRepo.currentSession()) mutable.update { it.copy(status = progress) } }
                 withContext(Dispatchers.IO) { fixedRepo.dao.delete(fixedRepo.account, "sync-meta", "failed") }
                 if (!fixedRepo.vault.get("${fixedRepo.account}.manager-member").isNullOrBlank()) {
-                    try { ManagerCorrections(fixedRepo).refresh() } catch (e: CancellationException) { throw e } catch (_: Exception) { /* Optional metadata does not invalidate a complete library. */ }
+                    try { ManagerCorrections(fixedRepo).refresh(); OwnershipRepository(fixedRepo).refresh() } catch (e: CancellationException) { throw e } catch (_: Exception) { /* Optional metadata does not invalidate a complete library. */ }
                 }
                 refreshLocal(); mutable.update { it.copy(connection = "已连接 NAS", status = "曲库已更新") }
                 if (!automatic) message("曲库已更新")
@@ -282,6 +283,7 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
     fun refreshCorrections() = task {
         val scoped = repo.scoped()
         com.eddyizm.tempus.jiayin.data.ManagerCorrections(scoped).refresh()
+        OwnershipRepository(scoped).refresh()
         refreshLocal()
         if (PlaybackHub.state.value.current != null) loadLyrics(false)
     }
@@ -315,7 +317,10 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
             }
             if (!repo.offline && System.currentTimeMillis() - lastCorrectionCheck > 30_000 && !repo.vault.get("${repo.account}.manager-member").isNullOrBlank()) {
                 lastCorrectionCheck = System.currentTimeMillis()
-                task { ManagerCorrections(repo).refresh(); refreshLocal() }
+                task {
+                    try { ManagerCorrections(repo).refresh() }
+                    finally { OwnershipRepository(repo).refresh(); refreshLocal() }
+                }
             }
         }
     }
@@ -333,7 +338,7 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
         discoveryJob = task {
             val snapshot = withContext(Dispatchers.IO) { Triple(repo.library(), repo.listening(), repo.get("discovery", "recent", Array<String>::class.java)?.toList().orEmpty()) }
             val eligible = if (repo.offline) snapshot.first.copy(tracks = snapshot.first.tracks.filter { AccountDownloads.downloaded(getApplication(), repo.account, it.id) }) else snapshot.first
-            val result = withContext(Dispatchers.Default) { DiscoveryEngine.extend(eligible, snapshot.second, DiscoveryState(recent = snapshot.third), emptyList(), emptySet(), System.nanoTime(), 30) }
+            val result = withContext(Dispatchers.Default) { DiscoveryEngine.extend(eligible, snapshot.second, DiscoveryState(recent = snapshot.third), emptyList(), emptySet(), System.nanoTime(), 30, state.value.index.ownership) }
             val picks = result.picks
             if (picks.isEmpty()) { message("没有更多未收藏、未加入歌单的歌曲了"); return@task }
             val byId = snapshot.first.tracks.associateBy { it.id }
@@ -357,7 +362,7 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
     fun dislike(track: Track) = task { withContext(Dispatchers.IO) { repo.dislike(track.id) }; refreshLocal(); message("以后不再推荐这首歌") }
     fun recommendations(from: Track? = null) = task {
         batch++
-        val result = withContext(Dispatchers.Default) { RecommendationEngine.recommend(state.value.library.tracks, state.value.records, System.currentTimeMillis() / 86_400_000 + batch, from = from) }
+        val result = withContext(Dispatchers.Default) { RecommendationEngine.recommend(state.value.library.tracks, state.value.records, System.currentTimeMillis() / 86_400_000 + batch, from = from, ownership = state.value.index.ownership) }
         mutable.update { it.copy(recommendations = result) }
     }
     fun rediscover() = task {

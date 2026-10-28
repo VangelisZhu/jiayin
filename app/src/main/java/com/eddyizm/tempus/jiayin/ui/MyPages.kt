@@ -41,12 +41,13 @@ import kotlinx.coroutines.withContext
         item { SheetActionPadded("我喜欢 · ${ui.library.tracks.count { it.starred }} 首", R.drawable.ic_favorite) { collection(MusicList("favorites", "我喜欢", ui.library.tracks.filter { it.starred }.map { it.id })) } }
         item { SectionTitle("收藏的歌手") }
         items(ui.artists.values.filter { it.starred }.sortedBy { it.name }, key = { it.id }) { p ->
-            val tracks = ui.library.tracks.filter { p.id in it.artistKeys() }
+            val tracks = ui.index.artists.find { it.id == p.id }?.tracks.orEmpty()
             ListItem(headlineContent = { Text(p.name) }, supportingContent = { Text("${tracks.size} 首") }, modifier = Modifier.clickable { collection(MusicList("artist:${p.id}", p.name, tracks.map { it.id }, tracks.firstOrNull()?.cover.orEmpty())) })
         }
         item { SheetActionPadded("最近听过", R.drawable.ic_timer) { route("history") } }
         item { SheetActionPadded("下载与离线", R.drawable.ic_download) { route("downloads") } }
         item { SheetActionPadded("曲库整理 · 我的申请", R.drawable.ic_settings) { route("corrections") } }
+        item { SheetActionPadded("作品归属 · 个人整理与申请", R.drawable.ic_sort_list) { route("ownership") } }
         item { SectionTitle("我的歌单", "新建", newPlaylist) }
         items(ui.library.playlists, key = { it.id }) { p -> ListItem(headlineContent = { Text(p.name) }, supportingContent = { Text("${p.tracks.size} 首${if (p.pending) " · 等待同步" else ""}") }, leadingContent = { PlaylistCover(p, ui.library.tracks, Modifier.size(58.dp)) }, modifier = Modifier.clickable { collection(p) }) }
         item { HorizontalDivider(Modifier.padding(horizontal = 24.dp, vertical = 18.dp)); Text(ui.connection, Modifier.padding(horizontal = 24.dp), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant); SheetActionPadded("连接测试${if (ui.pending > 0) " · ${ui.pending} 项待同步" else ""}", R.drawable.ic_refresh) { vm.test() } }

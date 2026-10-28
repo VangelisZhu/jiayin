@@ -27,10 +27,10 @@ async function browser(){
  const calls=[],routes=new Map(),timers=new Map(),intervals=[];
  let timer=0;
  const document={hidden:false,createElement:tag=>new Element(tag),createTextNode:text=>String(text),querySelector:s=>({'#app':app,'#drawer':drawer,'#notice':notice})[s]||null};
- const defaults={summary:{tracks:0,albums:0,artists:0,issues:{},drafts:0},members:[],corrections:[],'sources-config':{enabled:['qq','netease']},tasks:[],jobs:[],changes:[],suggestions:[],tracks:{items:[],ids:[],total:0},groups:{items:[],total:0},'ai/config':{usage:{},estimated_cost:null},navidrome:{config:{}}};
+ const defaults={summary:{tracks:0,albums:0,artists:0,issues:{},drafts:0},members:[],corrections:[],'ownership/requests':[],'sources-config':{enabled:['qq','netease']},tasks:[],jobs:[],changes:[],suggestions:[],tracks:{items:[],ids:[],total:0},groups:{items:[],total:0},'ai/config':{usage:{},estimated_cost:null},navidrome:{config:{}}};
  const fetch=async(url,options)=>{
   const path=url.replace('/api/','').split('?')[0];
-  const call={path,method:options.method,signal:options.signal};calls.push(call);
+  const call={path,method:options.method,signal:options.signal,body:options.body?JSON.parse(options.body):null};calls.push(call);
   const route=routes.get(path);
   if(route?.gate){
    await new Promise((resolve,reject)=>{
@@ -48,8 +48,9 @@ async function browser(){
  const files=new URL('../jiayin_manager/static/',import.meta.url);
  const source=await readFile(new URL('app.js',files),'utf8');
  const corrections=new vm.SourceTextModule(await readFile(new URL('corrections-ui.js',files),'utf8'),{context});
+ const ownership=new vm.SourceTextModule(await readFile(new URL('ownership-ui.js',files),'utf8'),{context});
  const module=new vm.SourceTextModule(source+'\nglobalThis.hooks={state,render,api,button};',{context});
- await module.link(()=>corrections);await module.evaluate();await flush();
+ await module.link(spec=>spec.includes('ownership-ui')?ownership:corrections);await module.evaluate();await flush();
  return {h:context.hooks,app,drawer,document,notice,calls,routes,timers,intervals};
 }
 
@@ -117,10 +118,10 @@ test('corrections poll terminal failures and remain guarded during dialogs and a
  b.routes.set('corrections',{gate,value:[{id:'generated',username:'Generated',status:'executing',preview:[],stage:'检查文件'}]});
  b.h.state.page='corrections';const pending=b.h.render();const before=b.calls.length;
  b.intervals[0]();assert.equal(b.calls.length,before);
- gate.resolve();await pending;assert.match(b.app.textContent,/正在执行/);
+ gate.resolve();await pending;assert.match(b.app.textContent,/正在执行/);const settled=b.calls.length;
  b.routes.set('corrections',{value:[{id:'generated',username:'Generated',status:'failed',preview:[],error:'原音频解码校验失败',progress:{total:1,completed:0,failed:1}}]});
- b.drawer.open=true;b.intervals[0]();assert.equal(b.calls.length,before);
- b.drawer.open=false;b.h.state.actionPending=1;b.intervals[0]();assert.equal(b.calls.length,before);
+ b.drawer.open=true;b.intervals[0]();assert.equal(b.calls.length,settled);
+ b.drawer.open=false;b.h.state.actionPending=1;b.intervals[0]();assert.equal(b.calls.length,settled);
  b.h.state.actionPending=0;b.intervals[0]();await flush();
  assert.match(b.app.textContent,/执行失败/);assert.match(b.app.textContent,/原音频解码校验失败/);
  assert.match(b.app.textContent,/已完成 0 \/ 1 项 · 1 项失败/);
@@ -133,4 +134,24 @@ test('read timeout shows a retry view instead of leaving an inert page',async()=
  const timer=[...b.timers.values()].find(t=>t.ms===20000);assert.ok(timer);timer.f();
  assert.match((await pending).message,/加载超时/);
  assert.match(b.app.textContent,/重试/);assert.equal(b.h.state.renderPending,null);
+});
+
+test('ownership review loads full detail and only publishes checked song IDs',async()=>{
+ const b=await browser();
+ const entries=['one','two'].map(id=>({track_id:id,title:'Generated '+id,credit:'Main / Guest',original_artists:['Main','Guest'],before_target:null,target:{name:'Main'}}));
+ const item={id:'generated-ownership',username:'Generated member',status:'pending',entry_count:2,entries};
+ b.routes.set('ownership/requests',{value:[item]});
+ b.routes.set('ownership/requests/generated-ownership',{value:item});
+ b.h.state.page='corrections';await b.h.render();
+ const all=n=>[n,...n.children.flatMap(x=>x instanceof Element?all(x):[])];
+ const action=(root,label)=>all(root).find(n=>n.tag==='button'&&n.textContent===label);
+ assert.match(b.app.textContent,/作品归属审核/);
+ await action(b.app,'审核归属').click();
+ assert.match(b.drawer.textContent,/保留演唱署名/);
+ const unchecked=all(b.drawer).find(n=>n.tag==='input'&&n.attrs['aria-label']==='Generated two');
+ unchecked.checked=false;
+ await action(b.drawer,'批准选中并发布').click();
+ const call=b.calls.find(n=>n.path==='ownership/generated-ownership/review');
+ assert.deepEqual(JSON.parse(JSON.stringify(call.body.track_ids)),['one']);
+ assert.equal(call.body.accept,true);
 });

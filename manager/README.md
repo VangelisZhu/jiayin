@@ -1,5 +1,7 @@
 # 家音曲库管理
 
+preview.14 新增独立的[作品归属审核](../docs/OWNERSHIP.md)：手机个人整理与共享申请分开；管理员批准后发布到家音客户端，保留完整演唱署名，无需修改音乐文件或等待扫描。原有资料纠正和目录操作继续使用各自流程。
+
 可选 NAS 网页后台：只读体检、歌曲与专辑标签、合唱关系、歌词编码预览、AI 建议、批量应用、目录迁移和按批次回退。普通家音播放仍通过 OpenSubsonic 工作，不要求安装后台。
 
 一个实例绑定一个音乐根目录和一个 Navidrome 音乐服务器，支持多个独立成员账户。后台连接使用服务账户，成员通过自己的音乐账户验证身份，并在网页独立授权。请先用生成曲库或副本验证；真实曲库迁移需要另行验收。
@@ -45,10 +47,10 @@
 
 升级前停止文件任务并备份整个私有数据目录（包括数据库、密钥、备份和封面暂存），然后替换镜像并保留原挂载。新增记录使用现有 SQLite 文档存储，不把索引合并成巨大字段。不要让两个后台进程同时管理同一数据目录。回退版本前恢复升级前的数据目录副本，不用旧版解释新版未完成任务。
 
-Release 提供 Linux amd64 离线镜像 `jiayin-manager-preview.11-amd64.tar.gz`；导入后镜像名为 `jiayin-manager:0.1-preview11`。ARM NAS 请使用源码构建，不把 amd64 镜像当作原生 ARM 镜像运行。使用 `compose.image.yaml` 可部署已导入的镜像；默认 `compose.yaml` 支持源码构建。
+Release 提供 Linux amd64 离线镜像 `jiayin-manager-preview.14-amd64.tar.gz`；导入后镜像名为 `jiayin-manager:0.1-preview14`。ARM NAS 请使用源码构建，不把 amd64 镜像当作原生 ARM 镜像运行。使用 `compose.image.yaml` 可部署已导入的镜像；默认 `compose.yaml` 支持源码构建。
 
 ```sh
-docker load -i jiayin-manager-preview.11-amd64.tar.gz
+docker load -i jiayin-manager-preview.14-amd64.tar.gz
 docker compose -f compose.image.yaml -f compose.navidrome-backup.yaml up -d
 ```
 

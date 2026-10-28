@@ -66,6 +66,7 @@ import kotlinx.coroutines.flow.map
     var parentCollection by remember { mutableStateOf<MusicList?>(null) }
     var menuTrack by remember { mutableStateOf<Track?>(null) }
     var correctionTarget by remember { mutableStateOf<CorrectionTarget?>(null) }
+    var ownershipTarget by remember { mutableStateOf<List<Track>?>(null) }
     var artistTarget by remember { mutableStateOf<Track?>(null) }
     var playlistTarget by remember { mutableStateOf<Track?>(null) }
     var newPlaylist by remember { mutableStateOf(false) }
@@ -146,14 +147,18 @@ import kotlinx.coroutines.flow.map
                             "my" -> MyPage(ui, vm, openCollection, openRoute, { newPlaylist = true })
                             "recommend" -> RecommendationPage(ui, vm, { menuTrack = it })
                             "detail" -> collection?.let { c ->
-                                val actual = ui.library.playlists.find { it.id == c.id } ?: c
-                                if (actual.id.startsWith("artist:") || actual.id.startsWith("歌手:")) ArtistPage(actual, ui, vm, backCollection, { menuTrack = it }, openCollection, openSearch) { tracks -> correctionTarget = CorrectionTarget(tracks, "artist", "纠正歌手作品") }
+                                val actual = ui.library.playlists.find { it.id == c.id } ?: if (c.id.startsWith("artist:")) {
+                                    val entry = ui.index.artists.find { it.id == c.id.removePrefix("artist:") }
+                                    c.copy(tracks = entry?.tracks.orEmpty().map { it.id })
+                                } else c
+                                if (actual.id.startsWith("artist:") || actual.id.startsWith("歌手:")) ArtistPage(actual, ui, vm, backCollection, { menuTrack = it }, openCollection, openSearch, { ownershipTarget = it }) { tracks -> correctionTarget = CorrectionTarget(tracks, "artist", "纠正歌手作品") }
                                 else CollectionPage(actual, ui, vm, backCollection, { menuTrack = it }, { renameList = actual }, { collection = it }) { tracks -> correctionTarget = CorrectionTarget(tracks, "album", "纠正专辑资料") }
                             }
                             "history" -> TrackPage("最近听过", ui.library.tracks.sortedByDescending { ui.records[it.id]?.lastHeard ?: 0 }.filter { (ui.records[it.id]?.lastHeard ?: 0) > 0 }, ui, vm, { route = "my" }, { menuTrack = it })
                             "settings" -> SettingsPage(vm, ui, theme ?: "system", { theme = it }, { route = "my" }, { route = "servers" })
                             "servers" -> ServerManagementPage(vm, back = { route = "settings" })
                             "corrections" -> CorrectionPage(vm, CorrectionTarget()) { route = "my" }
+                            "ownership" -> OwnershipPage(vm, emptyList()) { route = "my" }
                             "downloads" -> DownloadsPage(ui, vm, { menuTrack = it }, { route = "my" })
                         } }
                         }
@@ -180,7 +185,9 @@ import kotlinx.coroutines.flow.map
                 }
                 AnimatedVisibility(player, enter = fadeIn(tween(220)) + slideInVertically(tween(220)) { it / 6 }, exit = fadeOut(tween(220)) + slideOutVertically(tween(220)) { it / 6 }) {
                     FullPlayer(ui, playback, vm, dark, { player = false }, { playlistTarget = it }, { song ->
-                        if (song.performers().size > 1) artistTarget = song
+                        val owner = ui.index.ownership[song.id]
+                        if (owner != null) { player = false; openCollection(artistCollection(owner, ui.library.tracks, song.cover)) }
+                        else if (song.performers().size > 1) artistTarget = song
                         else { player = false; openCollection(artistCollection(song, ui.library.tracks)) }
                     }, { song -> correctionTarget = CorrectionTarget(listOf(song), title = "纠正歌曲信息") })
                 }
@@ -198,6 +205,7 @@ import kotlinx.coroutines.flow.map
                     SheetAction(R.drawable.ic_favorite, if (song.starred) "取消喜欢" else "我喜欢") { vm.favorite(song); menuTrack = null }
                     SheetAction(R.drawable.ic_playlist, "加入歌单") { playlistTarget = song; menuTrack = null }
                     SheetAction(R.drawable.ic_search, "查看演唱者") { artistTarget = song; menuTrack = null }
+                    SheetAction(R.drawable.ic_sort_list, "修改作品归属") { ownershipTarget = listOf(song); menuTrack = null }
                     SheetAction(R.drawable.ic_settings, "纠正歌曲信息") { correctionTarget = CorrectionTarget(listOf(song), title = "纠正歌曲信息"); menuTrack = null }
                     SheetAction(R.drawable.ic_download, "下载到手机") { vm.download(listOf(song)); menuTrack = null }
                     SheetAction(R.drawable.ic_refresh, "从这首继续听") { vm.recommendations(song); route = "recommend"; menuTrack = null }
@@ -206,10 +214,16 @@ import kotlinx.coroutines.flow.map
             }
         }
         correctionTarget?.let { target -> CorrectionPage(vm, target) { correctionTarget = null } }
+        ownershipTarget?.let { tracks -> OwnershipPage(vm, tracks) { ownershipTarget = null } }
         artistTarget?.let { song ->
             AlertDialog(onDismissRequest = { artistTarget = null }, title = { Text("演唱者") }, text = {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
-                    song.performers().forEach { artist -> TextButton({ artistTarget = null; player = false; openCollection(artistCollection(artist, ui.library.tracks, song.cover)) }) { Text(artist.name) } }
+                    ui.index.ownership[song.id]?.let { owner -> TextButton({ artistTarget = null; player = false; openCollection(artistCollection(owner, ui.library.tracks, song.cover)) }) { Text("作品归属：${owner.name}") } }
+                    song.performers().forEach { artist -> TextButton({
+                        artistTarget = null; player = false
+                        val original = artistCollection(artist, ui.library.tracks, song.cover)
+                        openCollection(if (ui.index.artists.any { it.id == artist.key }) original else original.copy(id = "participation:${artist.key}", name = "${artist.name} · 演唱作品"))
+                    }) { Text("演唱者：${artist.name}") } }
                 }
             }, confirmButton = { TextButton({ artistTarget = null }) { Text("返回") } })
         }

@@ -497,11 +497,11 @@ class JiayinMediaService : MediaLibraryService() {
                 val snapshot = withContext(Dispatchers.IO) {
                     val lib = repo.library()
                     val available = if (repo.offline) lib.copy(tracks = lib.tracks.filter { AccountDownloads.downloaded(this@JiayinMediaService, repo.account, it.id) }) else lib
-                    available to repo.listening()
+                    Triple(available, repo.listening(), com.eddyizm.tempus.jiayin.data.OwnershipRepository(repo).effective())
                 }
                 val batch = withContext(Dispatchers.Default) {
                     DiscoveryEngine.extend(snapshot.first, snapshot.second, before.discovery!!,
-                        before.entries.takeLast(10).map { it.trackId }, before.entries.drop(before.index + 1).map { it.trackId }.toSet(), System.nanoTime())
+                        before.entries.takeLast(10).map { it.trackId }, before.entries.drop(before.index + 1).map { it.trackId }.toSet(), System.nanoTime(), ownership = snapshot.third)
                 }
                 val map = snapshot.first.tracks.associateBy { it.id }
                 val items = withContext(Dispatchers.IO) { batch.picks.map { AccountDownloads.mediaItem(this@JiayinMediaService, repo, map.getValue(it.id)) } }

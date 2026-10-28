@@ -1,4 +1,4 @@
-import {initCorrections,membersPage,correctionsPage,sourceCorrection,sourcesPage} from './corrections-ui.js?v=navfix1';
+import {initCorrections,membersPage,correctionsPage,sourceCorrection,sourcesPage} from './corrections-ui.js?v=preview14';
 const $ = s => document.querySelector(s);
 const state = {page:'overview',libraryView:'songs',groupOffset:0,selected:new Set(),q:'',issue:'',offset:0,filterIds:[],tracks:[],summary:{},changes:new Set()};
 const names={title:'歌名',artists:'歌曲歌手',artist_credit:'显示署名',album:'专辑',album_artists:'专辑歌手',artist_ids:'歌手 MusicBrainz ID',album_artist_ids:'专辑歌手 MusicBrainz ID',genres:'曲风',date:'发行日期',original_date:'首次发行日期',track:'曲序',disc:'碟号',language:'语种',region:'整理地区',album_version:'专辑版本',recording_id:'MusicBrainz 录音 ID',release_id:'发行 ID',release_track_id:'发行曲目 ID',compilation:'合集',lyrics:'歌词',path:'路径'};
