@@ -151,7 +151,7 @@ class MediaPipelineTest {
         }
     }
 
-    internal class MediaServer(count: Int = 2, catalog: Boolean = false, supplied: List<Track>? = null, val username: String = "fixture", frequency: Int = 440, coverColor: Int = 0xff3b7777.toInt(), allowedUsers: Set<String> = setOf(username)) : AutoCloseable {
+    internal class MediaServer(count: Int = 2, catalog: Boolean = false, supplied: List<Track>? = null, val username: String = "fixture", frequency: Int = 440, coverColor: Int = 0xff3b7777.toInt(), allowedUsers: Set<String> = setOf(username), sampleRate: Int = 16000, bits: Int = 16, channels: Int = 1) : AutoCloseable {
         private val socket = ServerSocket(0)
         val port get() = socket.localPort
         var online = true
@@ -166,10 +166,13 @@ class MediaPipelineTest {
         val tracks = supplied ?: (1..count).map { Track("pipeline-$scope-$it", "播放测试 $it", if (catalog) "示例歌手 ${it % 3}" else "家音测试", album = if (catalog) "专辑 ${it % 2}" else "", albumId = if (catalog) "album-${it % 2}" else "", artistId = if (catalog) "artist-${it % 3}" else "", duration = 30, genre = if (catalog) "风格 ${it % 2}" else "", releaseDate = if (catalog) 20200101L + it * 10000 else 0) }
         var rejectMetadata = false
         val starCalls = AtomicInteger()
-        private val audio: ByteArray = ByteBuffer.allocate(44 + 16000 * 2 * 30).order(ByteOrder.LITTLE_ENDIAN).apply {
-            put("RIFF".toByteArray()); putInt(capacity() - 8); put("WAVEfmt ".toByteArray()); putInt(16); putShort(1); putShort(1)
-            putInt(16000); putInt(32000); putShort(2); putShort(16); put("data".toByteArray()); putInt(capacity() - 44)
-            repeat(16000 * 30) { putShort((sin(2 * Math.PI * frequency * it / 16000) * 2000).toInt().toShort()) }
+        private val audio: ByteArray = ByteBuffer.allocate(44 + sampleRate * (bits / 8) * channels * 30).order(ByteOrder.LITTLE_ENDIAN).apply {
+            put("RIFF".toByteArray()); putInt(capacity() - 8); put("WAVEfmt ".toByteArray()); putInt(16); putShort(1); putShort(channels.toShort())
+            putInt(sampleRate); putInt(sampleRate * (bits / 8) * channels); putShort(((bits / 8) * channels).toShort()); putShort(bits.toShort()); put("data".toByteArray()); putInt(capacity() - 44)
+            repeat(sampleRate * 30) { n -> repeat(channels) {
+                val value = (sin(2 * Math.PI * frequency * n / sampleRate) * if (bits == 24) 512000 else 2000).toInt()
+                if (bits == 24) { put(value.toByte()); put((value shr 8).toByte()); put((value shr 16).toByte()) } else putShort(value.toShort())
+            } }
         }.array()
         private val png = ByteArrayOutputStream().use { output ->
             Bitmap.createBitmap(96, 96, Bitmap.Config.ARGB_8888).apply { eraseColor(coverColor); compress(Bitmap.CompressFormat.PNG, 100, output); recycle() }

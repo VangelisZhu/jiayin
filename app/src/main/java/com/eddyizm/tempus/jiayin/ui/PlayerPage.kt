@@ -72,6 +72,8 @@ import sh.calvin.reorderable.*
 }
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable fun FullPlayer(ui: HomeState, playback: PlaybackState, vm: JiayinViewModel, dark: Boolean, close: () -> Unit, addToPlaylist: (Track) -> Unit = {}, artist: (Track) -> Unit = {}, correct: (Track) -> Unit = {}) {
+    var audioEffects by remember { mutableStateOf(false) }
+    if (audioEffects) AudioEffectsPage(vm) { audioEffects = false }
     var lyrics by rememberSaveable { mutableStateOf(false) }
     val lyricScroll = rememberLazyListState()
     val lyricFollow = rememberSaveable(playback.current?.id) { mutableStateOf(true) }
@@ -108,6 +110,7 @@ import sh.calvin.reorderable.*
                         Text(playback.queue.source, fontSize = 11.sp, color = foreground.copy(alpha = .6f), modifier = Modifier.padding(top = 4.dp), maxLines = 1)
                     }
                     IconAction(R.drawable.ic_timer, "睡眠定时") { timer = true }
+                    IconAction(R.drawable.ic_audio_effects, "音效与耳机") { audioEffects = true }
                 }
                 if (t == null) Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) { Text("从曲库挑一首喜欢的歌吧") }
                 else {

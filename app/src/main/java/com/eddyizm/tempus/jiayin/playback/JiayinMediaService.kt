@@ -25,10 +25,8 @@ import com.eddyizm.tempus.jiayin.data.JiayinRepository
 import com.eddyizm.tempus.jiayin.data.AccountDownloads
 import com.eddyizm.tempus.service.QueuePreloader
 import com.eddyizm.tempus.subsonic.models.Child
-import com.eddyizm.tempus.util.DownloadUtil
 import com.eddyizm.tempus.util.MappingUtil
 import com.eddyizm.tempus.util.MusicUtil
-import com.eddyizm.tempus.util.ReplayGainUtil
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.SettableFuture
@@ -80,6 +78,7 @@ class JiayinMediaService : MediaLibraryService() {
     private val commands = Mutex()
     private lateinit var repo: JiayinRepository
     private lateinit var player: ExoPlayer
+    private lateinit var audioEffects: AudioEffectController
     private lateinit var session: MediaLibrarySession
     private var sessionReleased = false
     private fun releaseSession() {
@@ -139,11 +138,19 @@ class JiayinMediaService : MediaLibraryService() {
                 AudioManager.AUDIOFOCUS_GAIN -> { player.volume = 1f; if (ResumePolicy(repo.settings.getBoolean("auto-resume", false)).mayResume(cause)) play() }
             }
         }
-        player = ExoPlayer.Builder(this, DownloadUtil.buildRenderersFactory(this, false))
+        audioEffects = AudioEffectController(this, repo)
+        player = ExoPlayer.Builder(this, audioEffects.renderers())
             .setMediaSourceFactory(DefaultMediaSourceFactory(AccountDownloads.playbackFactory(this, repo))
                 .setLoadErrorHandlingPolicy(DefaultLoadErrorHandlingPolicy(0))) // retries are bounded here, once
             .setAudioAttributes(AudioAttributes.DEFAULT, false).setHandleAudioBecomingNoisy(false)
             .setWakeMode(C.WAKE_MODE_NETWORK).build()
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setAudioOffloadPreferences(
+            TrackSelectionParameters.AudioOffloadPreferences.Builder().setAudioOffloadMode(TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_DISABLED).build()).build()
+        player.addAnalyticsListener(object : androidx.media3.exoplayer.analytics.AnalyticsListener {
+            override fun onAudioInputFormatChanged(eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime, format: Format, decoderReuseEvaluation: androidx.media3.exoplayer.DecoderReuseEvaluation?) {
+                if (epoch == lifecycleEpoch && !quiescing) audioEffects.sourceChannels(format.channelCount)
+            }
+        })
         val controls = object : ForwardingPlayer(player) {
             override fun getCurrentPosition() = absolutePosition()
             override fun getContentPosition() = absolutePosition()
@@ -195,7 +202,7 @@ class JiayinMediaService : MediaLibraryService() {
                         lastKey = key; completionKey = null; heardMs = 0; heardThisPlay = 0; retryCount = 0; retryJob?.cancel()
                         if (key != offsetKey) { offsetMs = 0; offsetKey = null }
                         generation++
-                        p.currentMediaItem?.let { ReplayGainUtil.applyGain(p, it) }
+                        audioEffects.refresh(tracks[state.current?.trackId])
                         refreshUpcoming()
                     }
                     goingBack = false
@@ -306,7 +313,7 @@ class JiayinMediaService : MediaLibraryService() {
         if (resourcesOpen && !quiescing && !sessionReleased && session === this.session && repo.currentSession()) super.onUpdateNotification(session, startInForegroundRequired)
     }
     private fun absolutePosition() = player.currentPosition.coerceAtLeast(0) + if (state.current?.key == offsetKey) offsetMs else 0
-    private fun publish() { if (quiescing || !repo.currentSession()) return; updateFavoriteButton(); PlaybackHub.mutable.value = PlaybackState(state.copy(positionMs = if (player.mediaItemCount > 0) absolutePosition() else state.positionMs), state.current?.trackId?.let { tracks[it] }, player.isPlaying, player.playbackState == Player.STATE_BUFFERING, cause, error, true, sleepUntil, discoveryNotice) }
+    private fun publish() { if (quiescing || !repo.currentSession()) return; audioEffects.refresh(tracks[state.current?.trackId]); updateFavoriteButton(); PlaybackHub.mutable.value = PlaybackState(state.copy(positionMs = if (player.mediaItemCount > 0) absolutePosition() else state.positionMs), state.current?.trackId?.let { tracks[it] }, player.isPlaying, player.playbackState == Player.STATE_BUFFERING, cause, error, true, sleepUntil, discoveryNotice) }
     private fun updateFavoriteButton() {
         if (!::session.isInitialized) return
         val t = tracks[state.current?.trackId]
@@ -630,7 +637,7 @@ class JiayinMediaService : MediaLibraryService() {
         resourcesOpen = false; lifecycleEpoch++
         preloader?.cancel(); QueuePreloader.cancel(); focus.abandon()
         unregisterReceiver(noisy); getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(network)
-        releaseSession(); player.release()
+        audioEffects.close(); releaseSession(); player.release()
         // Let final ordered IO snapshots complete; cancel UI/retry jobs separately.
         scope.cancel()
         val oldStorage = storage

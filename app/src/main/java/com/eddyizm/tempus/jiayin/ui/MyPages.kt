@@ -56,6 +56,8 @@ import kotlinx.coroutines.withContext
 }
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable fun SettingsPage(vm: JiayinViewModel, ui: HomeState, theme: String, setTheme: (String) -> Unit, back: () -> Unit, servers: () -> Unit) {
+    var audioEffects by remember { mutableStateOf(false) }
+    if (audioEffects) AudioEffectsPage(vm) { audioEffects = false }
     val settingsRepo = vm.repo
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -83,6 +85,7 @@ import kotlinx.coroutines.withContext
         item { ListItem(headlineContent = { Text("NAS 曲库管理 · 共享分类") }, supportingContent = { Text(if (managerUrl.isBlank()) "可选连接；普通 OpenSubsonic 播放不需要" else "已配置 · 只读取当前账户的已核对分类") }, modifier = Modifier.clickable { manager = true }) }
         item { ListItem(headlineContent = { Text("资料纠正 · 账户权限与申请") }, supportingContent = { Text("连接配套后台，按当前音乐账户授权") }, modifier = Modifier.clickable { correctionManager = true }) }
         item { SectionTitle("播放与恢复") }
+        item { ListItem(headlineContent = { Text("音效与耳机") }, supportingContent = { Text("自动音色、固定预设、自然耐听与轻度沉浸") }, modifier = Modifier.clickable { audioEffects = true }) }
         item { SettingToggle("被视频打断后自动恢复", "默认关闭。仅恢复被声音打断的音乐，不覆盖主动暂停或耳机断开。", "auto-resume", false, vm) }
         item { SettingToggle("队列结束后推荐续播", "从现有曲库继续挑选；与循环播放独立。", "recommend-autoplay", false, vm) }
         item { ListItem(headlineContent = { Text("蓝牙耳机") }, supportingContent = { Text("断开时暂停；重新连接后由你点播放。") }, leadingContent = { AppIcon(R.drawable.ic_play, "蓝牙播放策略") }) }
