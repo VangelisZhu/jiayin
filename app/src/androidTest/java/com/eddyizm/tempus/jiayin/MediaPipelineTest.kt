@@ -161,6 +161,8 @@ class MediaPipelineTest {
         val searches = AtomicInteger()
         var lyrics: Lyrics? = null
         var jsonCharset: String? = null
+        val offsets = java.util.concurrent.CopyOnWriteArrayList<Int>()
+        var streamDelay = 0L
         val streams = AtomicInteger(); val images = AtomicInteger(); val downloads = AtomicInteger()
         private val scope = UUID.randomUUID().toString()
         val tracks = supplied ?: (1..count).map { Track("pipeline-$scope-$it", "播放测试 $it", if (catalog) "示例歌手 ${it % 3}" else "家音测试", album = if (catalog) "专辑 ${it % 2}" else "", albumId = if (catalog) "album-${it % 2}" else "", artistId = if (catalog) "artist-${it % 3}" else "", duration = 30, genre = if (catalog) "风格 ${it % 2}" else "", releaseDate = if (catalog) 20200101L + it * 10000 else 0) }
@@ -199,7 +201,19 @@ class MediaPipelineTest {
                     var type = "application/json" + (jsonCharset?.let { "; charset=$it" } ?: "")
                     val result: ByteArray = if (!online || !authenticated) "unavailable".toByteArray() else when {
                         request.contains("/getCoverArt") -> { images.incrementAndGet(); type = "image/png"; png }
-                        request.contains("/stream") -> { streams.incrementAndGet(); type = "audio/wav"; audio }
+                        request.contains("/stream") -> {
+                            streams.incrementAndGet(); type = "audio/wav"
+                            val seconds = (parameters["timeOffset"]?.toIntOrNull() ?: 0).coerceIn(0, 29)
+                            offsets.add(seconds)
+                            if (streamDelay > 0) Thread.sleep(streamDelay)
+                            if (seconds == 0) audio else {
+                                val skip = seconds * sampleRate * (bits / 8) * channels
+                                val remaining = audio.size - 44 - skip
+                                ByteBuffer.allocate(44 + remaining).order(ByteOrder.LITTLE_ENDIAN).apply {
+                                    put(audio, 0, 44); putInt(4, 36 + remaining); putInt(40, remaining); put(audio, 44 + skip, remaining)
+                                }.array()
+                            }
+                        }
                         request.contains("/download") -> { downloads.incrementAndGet(); type = "audio/wav"; audio }
                         else -> Gson().toJson(mapOf("subsonic-response" to when {
                             request.contains("/search3") -> {

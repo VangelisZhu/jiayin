@@ -72,3 +72,5 @@ APK 与后台均提供源码。后台 API v2 从 preview.11 开始；旧只读�
 ## 开源来源
 
 上游 Tempus 的版权、包命名空间、许可证和第三方声明继续保留，见 [NOTICE.md](NOTICE.md) 和 [原始 README](README.upstream.md)。本分支改造页面、播放控制、曲库持久化、推荐、歌词与下载交互。不是 Tempus 官方发布，也与商业音乐平台无关联。
+
+当前 preview.16 候选版增加鲜明音色、系统进度定位修复及可选 B站恢复兼容。详见 [播放恢复说明](docs/PLAYBACK_RECOVERY.md)；真机验证状态见 [测试记录](TESTING.md)。

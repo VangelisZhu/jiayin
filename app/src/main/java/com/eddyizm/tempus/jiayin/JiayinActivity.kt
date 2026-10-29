@@ -31,5 +31,5 @@ class JiayinActivity : ComponentActivity() {
         super.onNewIntent(intent); setIntent(intent)
         if (intent.action == "jiayin.player") model.requestPlayer()
     }
-    override fun onResume() { super.onResume(); if (::model.isInitialized) model.foreground() }
+    override fun onResume() { super.onResume(); if (::model.isInitialized) model.foreground(userReturn = true) }
 }

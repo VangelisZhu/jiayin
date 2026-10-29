@@ -53,7 +53,7 @@ class AudioEffectsAndroidTest {
             p.configure(AudioFormat(48000, 2, C.ENCODING_PCM_16BIT)); p.flush()
             var last = 0
             repeat(100) { n ->
-                p.configure(AudioEffectConfig(n % 3 != 0, SoundPreset.entries[n % 6], (n % 10) / 10f, SpaceMode.entries[n % 3], .5f))
+                p.configure(AudioEffectConfig(n % 3 != 0, SoundPreset.entries[n % 6], (n % 10) / 10f, SpaceMode.entries[n % 3], .5f, SoundCharacter.entries[n % 2]))
                 delay(8)
                 repeat(12) {
                     val result = process(p, wave(1024)); assertEquals(2048, result.size)
@@ -115,6 +115,7 @@ class AudioEffectsAndroidTest {
                 await("actual AudioTrack route and PCM") { PlaybackHub.state.value.playing && AudioEffectHub.state.value.output != SoundOutput.UNKNOWN && AudioEffectHub.state.value.processing.format.rate > 0 }
                 val output = AudioEffectHub.state.value.output
                 assertEquals(48000, AudioEffectHub.state.value.processing.format.rate)
+                assertTrue(AudioEffectHub.state.value.inputFrames > 0)
                 assertEquals(2, AudioEffectHub.state.value.processing.format.channels)
                 assertEquals(C.ENCODING_PCM_16BIT, AudioEffectHub.state.value.processing.format.encoding)
                 val before = PlaybackHub.state.value.queue
@@ -155,9 +156,10 @@ class AudioEffectsAndroidTest {
                 await("UI playing") { PlaybackHub.state.value.playing && AudioEffectHub.state.value.output != SoundOutput.UNKNOWN }
                 store.save(SoundOutput.SPEAKER, AudioEffectSettings())
                 scenario.onActivity { a -> a.setContent { androidx.compose.material3.MaterialTheme { AudioEffectsPage(vm) { a.finish() } } } }
-                click("耳机"); click("音效总开关"); click("固定"); click("固定音色：温暖饱满"); click("流行人声")
+                click("耳机"); click("音效总开关"); click("固定"); click("鲜明档"); click("固定音色：温暖饱满"); click("流行人声")
                 assertTrue(store.settings(SoundOutput.HEADPHONES).enabled)
                 assertEquals(SoundStrategy.FIXED, store.settings(SoundOutput.HEADPHONES).strategy)
+                assertEquals(SoundCharacter.VIVID, store.settings(SoundOutput.HEADPHONES).character)
                 assertEquals(SoundPreset.VOCAL, store.settings(SoundOutput.HEADPHONES).preset)
                 delay(800)
                 val file = java.io.File(context.getExternalFilesDir(null), "ui-fixture/audio-effects.png"); file.parentFile!!.mkdirs()

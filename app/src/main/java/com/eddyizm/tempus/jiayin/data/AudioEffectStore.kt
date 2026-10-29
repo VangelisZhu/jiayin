@@ -13,12 +13,12 @@ class AudioEffectStore(val prefs: SharedPreferences) {
         return AudioEffectSettings(prefs.getBoolean("audio-effects.enabled", false), enum(p + "strategy", SoundStrategy.AUTO),
             enum(p + "preset", SoundPreset.WARM), prefs.getFloat(p + "strength", .5f).finite(.5f),
             enum(p + "space", if (output == SoundOutput.HEADPHONES) SpaceMode.NATURAL else SpaceMode.OFF),
-            prefs.getFloat(p + "space-strength", .25f).finite(.25f))
+            prefs.getFloat(p + "space-strength", .25f).finite(.25f), enum(p + "character", SoundCharacter.NATURAL))
     }
     fun save(output: SoundOutput, value: AudioEffectSettings) {
         val p = key(output)
         prefs.edit().putBoolean("audio-effects.enabled", value.enabled).putString(p + "strategy", value.strategy.name)
-            .putString(p + "preset", value.preset.name).putFloat(p + "strength", value.strength.finite(.5f))
+            .putString(p + "character", value.character.name).putString(p + "preset", value.preset.name).putFloat(p + "strength", value.strength.finite(.5f))
             .putString(p + "space", value.space.name).putFloat(p + "space-strength", value.spaceStrength.finite(.25f)).apply()
     }
     private fun songKey(account: String, id: String) = "$account.audio-song.${digest(id)}"

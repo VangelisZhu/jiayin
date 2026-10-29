@@ -87,6 +87,7 @@ import kotlinx.coroutines.withContext
         item { SectionTitle("播放与恢复") }
         item { ListItem(headlineContent = { Text("音效与耳机") }, supportingContent = { Text("自动音色、固定预设、自然耐听与轻度沉浸") }, modifier = Modifier.clickable { audioEffects = true }) }
         item { SettingToggle("被视频打断后自动恢复", "默认关闭。仅恢复被声音打断的音乐，不覆盖主动暂停或耳机断开。", "auto-resume", false, vm) }
+        item { VideoRecoverySettings(p) }
         item { SettingToggle("队列结束后推荐续播", "从现有曲库继续挑选；与循环播放独立。", "recommend-autoplay", false, vm) }
         item { ListItem(headlineContent = { Text("蓝牙耳机") }, supportingContent = { Text("断开时暂停；重新连接后由你点播放。") }, leadingContent = { AppIcon(R.drawable.ic_play, "蓝牙播放策略") }) }
         item { TextButton({ context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}"))) }, Modifier.padding(horizontal = 18.dp)) { Text("打开应用后台与电池设置") } }
@@ -154,7 +155,13 @@ import kotlinx.coroutines.withContext
 }
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable fun SettingToggle(title: String, subtitle: String, key: String, default: Boolean, vm: JiayinViewModel) {
-    var checked by remember { mutableStateOf(vm.repo.settings.getBoolean(key, default)) }
+    val preferences = vm.repo.settings
+    var checked by remember(preferences, key) { mutableStateOf(preferences.getBoolean(key, default)) }
+    DisposableEffect(preferences, key) {
+        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, changed -> if (changed == key) checked = preferences.getBoolean(key, default) }
+        preferences.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { preferences.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
     ListItem(headlineContent = { Text(title) }, supportingContent = { Text(subtitle, fontSize = 12.sp) }, trailingContent = { Switch(checked, { checked = it; vm.repo.settings.edit().putBoolean(key, it).apply() }) })
 }
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)

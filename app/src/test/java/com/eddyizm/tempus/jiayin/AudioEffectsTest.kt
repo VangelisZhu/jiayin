@@ -98,4 +98,29 @@ class AudioEffectsTest {
         val out = DoubleArray(2); dsp.frame(.1, -.8, out)
         assertTrue(dsp.bypass); assertArrayEquals(doubleArrayOf(.1, -.8), out, 0.0)
     }
+    @Test fun vividPreservesDefaultsAndFlatButHasStrongerMeasuredBassContrast() {
+        assertEquals(SoundCharacter.NATURAL, AudioEffectSettings().character)
+        fun level(c: SoundCharacter, f: Double): Double {
+            val dsp = AudioEffectDsp(AudioEffectConfig(true, SoundPreset.WARM, .5f, character = c), 48000, 2)
+            val out = DoubleArray(2); var power = 0.0
+            repeat(24000) { n -> val x = .3 * sin(2 * PI * f * n / 48000); dsp.frame(x, x, out); if (n > 2400) power += out[0] * out[0] }
+            return power
+        }
+        assertTrue(level(SoundCharacter.VIVID, 80.0) / level(SoundCharacter.VIVID, 3000.0) > level(SoundCharacter.NATURAL, 80.0) / level(SoundCharacter.NATURAL, 3000.0))
+        for (config in listOf(AudioEffectConfig(true, SoundPreset.FLAT, character = SoundCharacter.VIVID), AudioEffectConfig(true, strength = 0f, character = SoundCharacter.VIVID))) {
+            val dsp = AudioEffectDsp(config, 48000, 2); val out = DoubleArray(2)
+            repeat(1000) { dsp.frame(.3, -.2, out); assertArrayEquals(doubleArrayOf(.3, -.2), out, 0.0) }
+        }
+    }
+    @Test fun vividAllPresetsRatesAndSpacesStayFiniteAtFullScale() {
+        val out = DoubleArray(2)
+        for (rate in listOf(44100, 48000, 96000)) for (preset in SoundPreset.entries) for (space in SpaceMode.entries) {
+            val dsp = AudioEffectDsp(AudioEffectConfig(true, preset, 1f, space, 1f, SoundCharacter.VIVID), rate, 2)
+            repeat(rate / 3) { n -> val x = if (n < 1000) if (n % 2 == 0) 1.0 else -1.0 else 0.0
+                dsp.frame(x, -x, out); assertTrue(out.all { it.isFinite() && abs(it) < 2 })
+            }
+            assertTrue(out.all { abs(it) < 1e-6 })
+        }
+    }
+
 }

@@ -5,6 +5,8 @@ import kotlin.math.*
 enum class SoundPreset(val label: String) {
     WARM("温暖饱满"), VOCAL("流行人声"), RHYTHM("节奏低频"), ROCK("摇滚层次"), ACOUSTIC("原声自然"), FLAT("均衡原声")
 }
+enum class SoundCharacter(val label: String, val multiplier: Double) { NATURAL("自然", 1.0), VIVID("鲜明", 2.0) }
+
 enum class SoundStrategy(val label: String) { AUTO("自动"), FIXED("固定") }
 enum class SpaceMode(val label: String) { OFF("关闭"), NATURAL("自然耐听"), IMMERSIVE("轻度沉浸") }
 enum class SoundOutput(val label: String) { HEADPHONES("耳机"), SPEAKER("手机扬声器"), OTHER("其他本地输出"), UNKNOWN("等待实际输出"), REMOTE("远端播放") }
@@ -12,10 +14,12 @@ data class AudioEffectSettings(
     val enabled: Boolean = false, val strategy: SoundStrategy = SoundStrategy.AUTO,
     val preset: SoundPreset = SoundPreset.WARM, val strength: Float = .5f,
     val space: SpaceMode = SpaceMode.OFF, val spaceStrength: Float = .25f,
+    val character: SoundCharacter = SoundCharacter.NATURAL,
 )
 data class ResolvedAudioEffect(val preset: SoundPreset, val reason: String)
 data class AudioEffectConfig(val enabled: Boolean = false, val preset: SoundPreset = SoundPreset.WARM,
-    val strength: Float = .5f, val space: SpaceMode = SpaceMode.OFF, val spaceStrength: Float = .25f)
+    val strength: Float = .5f, val space: SpaceMode = SpaceMode.OFF, val spaceStrength: Float = .25f,
+    val character: SoundCharacter = SoundCharacter.NATURAL)
 
 object AudioEffectResolver {
     private fun normal(s: String) = s.trim().lowercase(java.util.Locale.ROOT).replace(Regex("[\\s_–—-]+"), "")
@@ -36,13 +40,13 @@ object AudioEffectResolver {
     }
     fun config(s: AudioEffectSettings, resolved: ResolvedAudioEffect, output: SoundOutput, compare: Boolean) = AudioEffectConfig(
         s.enabled && !compare && output != SoundOutput.REMOTE, resolved.preset, s.strength.coerceIn(0f, 1f),
-        if (output in listOf(SoundOutput.UNKNOWN, SoundOutput.REMOTE)) SpaceMode.OFF else s.space, s.spaceStrength.coerceIn(0f, 1f))
+        if (output in listOf(SoundOutput.UNKNOWN, SoundOutput.REMOTE)) SpaceMode.OFF else s.space, s.spaceStrength.coerceIn(0f, 1f), s.character)
 }
 
 /** Pure, bounded stereo DSP; built off the render thread. A single final conversion follows DSP. */
 class AudioEffectDsp(val config: AudioEffectConfig, val sampleRate: Int, val channels: Int) {
     private data class Coeff(val b0: Double, val b1: Double, val b2: Double, val a1: Double, val a2: Double)
-    private val gains = gains(config.preset).map { it * config.strength.coerceIn(0f, 1f) }
+    private val gains = gains(config.preset).map { (it * config.character.multiplier).coerceIn(-6.0, 6.0) * config.strength.coerceIn(0f, 1f) }
     private val coeffs = frequencies.mapIndexedNotNull { i, f ->
         if (f >= sampleRate * .45 || gains[i] == 0.0) null else {
             val a = 10.0.pow(gains[i] / 40); val w = 2 * PI * f / sampleRate

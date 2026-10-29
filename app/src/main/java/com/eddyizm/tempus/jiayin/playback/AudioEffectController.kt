@@ -19,7 +19,8 @@ import kotlinx.coroutines.flow.*
 
 data class AudioEffectState(val output: SoundOutput = SoundOutput.UNKNOWN, val account: String = "",
     val trackId: String? = null, val resolved: ResolvedAudioEffect = ResolvedAudioEffect(SoundPreset.WARM, "等待歌曲"),
-    val status: String = "未播放 · 设置将在起播时应用", val processing: EffectProcessing = EffectProcessing())
+    val status: String = "未播放 · 设置将在起播时应用", val processing: EffectProcessing = EffectProcessing(),
+    val route: String = "等待实际输出", val inputFrames: Long = 0, val receiving: Boolean = false)
 object AudioEffectHub {
     internal val mutable = MutableStateFlow(AudioEffectState())
     val state = mutable.asStateFlow()
@@ -86,7 +87,7 @@ class AudioEffectController(private val context: Context, private val repo: Jiay
         val songChanged = song?.id != track?.id
         song = track
         val device = runCatching { audioTrack?.routedDevice }.getOrNull()
-        if (device != null) output = outputFor(device.type)
+        output = device?.let { outputFor(it.type) } ?: SoundOutput.UNKNOWN
         val s = store.settings(output)
         val resolved = AudioEffectResolver.resolve(s, track?.genreNames().orEmpty(), store.song(repo.account, track?.id))
         val comparing = AudioEffectHub.comparison.value != null
@@ -108,7 +109,9 @@ class AudioEffectController(private val context: Context, private val repo: Jiay
             output == SoundOutput.UNKNOWN -> "音色已生效 · 等待实际输出，空间效果未应用"
             else -> "已生效"
         }
-        AudioEffectHub.mutable.value = AudioEffectState(output, repo.account, track?.id, resolved, status, processing)
+        AudioEffectHub.mutable.value = AudioEffectState(output, repo.account, track?.id, resolved, status, processing, routeLabel(device?.type), processor.inputFrames,
+            processor.lastInputMs > 0 && android.os.SystemClock.elapsedRealtime() - processor.lastInputMs < 1500 &&
+                runCatching { audioTrack?.playState == AudioTrack.PLAYSTATE_PLAYING }.getOrDefault(false))
     }
     fun close() {
         closed = true
@@ -118,6 +121,13 @@ class AudioEffectController(private val context: Context, private val repo: Jiay
         AudioEffectHub.comparison.value = null; AudioEffectHub.mutable.value = AudioEffectState()
     }
     companion object {
+        fun routeLabel(type: Int?): String = when (type) {
+            AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLE_HEADSET, AudioDeviceInfo.TYPE_HEARING_AID -> "蓝牙耳机"
+            AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "蓝牙通话输出"
+            AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADPHONES, AudioDeviceInfo.TYPE_USB_HEADSET -> "有线 / USB 耳机"
+            null -> "等待实际输出"
+            else -> outputFor(type).label
+        }
         fun outputFor(type: Int): SoundOutput = when (type) {
             AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
             AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLUETOOTH_SCO,

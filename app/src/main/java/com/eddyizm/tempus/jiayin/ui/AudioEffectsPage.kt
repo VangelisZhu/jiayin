@@ -35,6 +35,11 @@ import java.util.UUID
     val comparing by AudioEffectHub.comparison.collectAsState()
     var revision by remember { mutableIntStateOf(0) }
     var editing by remember { mutableStateOf(actual.output.takeIf { it in listOf(SoundOutput.HEADPHONES, SoundOutput.SPEAKER, SoundOutput.OTHER) } ?: SoundOutput.HEADPHONES) }
+    var routeSelected by remember { mutableStateOf(false) }
+    var diagnostics by remember { mutableStateOf(false) }
+    LaunchedEffect(actual.output) {
+        if (!routeSelected && actual.output in listOf(SoundOutput.HEADPHONES, SoundOutput.SPEAKER, SoundOutput.OTHER)) editing = actual.output
+    }
     var presetPicker by remember { mutableStateOf(false) }
     var songPicker by remember { mutableStateOf<Track?>(null) }
     var reset by remember { mutableStateOf(false) }
@@ -66,13 +71,17 @@ import java.util.UUID
                     HorizontalDivider()
                     Text("编辑输出偏好", style = MaterialTheme.typography.titleMedium)
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf(SoundOutput.HEADPHONES, SoundOutput.SPEAKER, SoundOutput.OTHER).forEach { output -> FilterChip(editing == output, { editing = output }, label = { Text(output.label) }) }
+                        listOf(SoundOutput.HEADPHONES, SoundOutput.SPEAKER, SoundOutput.OTHER).forEach { output -> FilterChip(editing == output, { routeSelected = true; editing = output }, label = { Text(output.label) }) }
                     }
                     if (editing != actual.output) Text("正在设置${editing.label}，实际切换到此输出后应用。", style = MaterialTheme.typography.bodySmall)
                     Text("音色策略", style = MaterialTheme.typography.titleMedium)
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) { SoundStrategy.entries.forEach { s -> FilterChip(settings.strategy == s, { save(settings.copy(strategy = s)) }, label = { Text(s.label) }) } }
                     OutlinedButton({ presetPicker = true }, Modifier.fillMaxWidth()) { Text("${if (settings.strategy == SoundStrategy.AUTO) "默认音色" else "固定音色"}：${settings.preset.label}") }
                     Text(if (settings.strategy == SoundStrategy.AUTO) "歌曲指定优先，其次按明确曲风选择；未知或冲突时使用默认音色。" else "所有歌曲使用固定音色，暂不使用曲风和歌曲指定。", style = MaterialTheme.typography.bodySmall)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) { SoundCharacter.entries.forEach { c ->
+                        FilterChip(settings.character == c, { save(settings.copy(character = c)) }, label = { Text("${c.label}档") })
+                    } }
+                    Text(if (settings.character == SoundCharacter.VIVID) "音色变化更鲜明，保留增益余量；空间效果单独调整。" else "克制修饰，保持原有自然音色。", style = MaterialTheme.typography.bodySmall)
                     Text("音色强度 ${(settings.strength * 100).toInt()}%")
                     Slider(settings.strength, { save(settings.copy(strength = it)) }, Modifier.semantics { contentDescription = "音色强度" })
                     Text("耳机空间", style = MaterialTheme.typography.titleMedium)
@@ -84,6 +93,13 @@ import java.util.UUID
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton({ AudioEffectHub.compare(compareToken, comparing != compareToken) }, enabled = current != null && settings.enabled) { Text(if (comparing == compareToken) "结束原声对比" else "原声对比") }
                         TextButton({ reset = true }) { Text("恢复默认") }
+                    }
+                    TextButton({ diagnostics = !diagnostics }) { Text(if (diagnostics) "收起音效运行状态" else "音效运行状态") }
+                    if (diagnostics) {
+                        val applied = actual.processing.applied
+                        Text("实际输出：${actual.route}\n${if (actual.receiving) "正在接收 PCM 数据" else "当前没有持续输入（暂停或缓冲）"} · 累计 ${actual.inputFrames} 帧\n" +
+                            "实际配置：${applied?.let { "${it.preset.label} · ${it.character.label} · ${(it.strength * 100).toInt()}% · ${it.space.label}" } ?: "尚未应用"}\n" +
+                            "状态：${actual.status}", style = MaterialTheme.typography.bodySmall)
                     }
                     if (message.isNotEmpty()) Text(message, color = MaterialTheme.colorScheme.error)
                     Text("音效使用软件 PCM 输出，不承诺位完美或高位深直出。空间模式是立体声处理，不是杜比全景声或头部追踪。", style = MaterialTheme.typography.bodySmall)

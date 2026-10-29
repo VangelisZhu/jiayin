@@ -140,8 +140,8 @@ class ContinuousPlaybackTest {
             repeat(5) { main { vm.foreground() }; delay(100) }
             assertEquals(0, server.searches.get())
             var job: Job? = null
-            main { job = vm.sync() }; job!!.join()
-            assertEquals(1, server.searches.get())
+            main { vm.foreground(); job = vm.sync() }; job!!.join()
+            assertEquals("Explicit sync must not be swallowed by an in-flight automatic due check", 1, server.searches.get())
             server.online = false
             main { job = vm.sync() }; job!!.join()
             assertEquals(80, repo.library().tracks.size)

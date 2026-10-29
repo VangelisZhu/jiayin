@@ -15,7 +15,6 @@ import androidx.media3.common.*
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
-import androidx.media3.exoplayer.source.ForwardingTimeline
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.session.*
 import androidx.media3.session.MediaLibraryService.MediaLibrarySession
@@ -79,12 +78,54 @@ class JiayinMediaService : MediaLibraryService() {
     private lateinit var repo: JiayinRepository
     private lateinit var player: ExoPlayer
     private lateinit var audioEffects: AudioEffectController
+    private lateinit var controls: SessionPlayer
+    private var pendingSeek: Pair<String, Long>? = null
+    private var seekTask: Job? = null
     private lateinit var session: MediaLibrarySession
     private var sessionReleased = false
     private fun releaseSession() {
         if (!sessionReleased && ::session.isInitialized) { sessionReleased = true; removeSession(session); session.release() }
     }
     private lateinit var focus: AudioFocusCoordinator
+    private val resumeGate = ResumeGate()
+    private var videoResumeJob: Job? = null
+    private var videoDeadline: Long? = null
+    private val resumePreferences = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        scope.launch {
+            if (key == "auto-resume" && !repo.settings.getBoolean(key, false)) cancelResume("automatic-disabled")
+            if (key == "video-resume-compat" && !repo.settings.getBoolean(key, false)) { resumeGate.clearVideo(); videoResumeJob?.cancel(); videoDeadline = null }
+        }
+    }
+    private fun cancelResume(reason: String) {
+        if (resumeGate.eligible) RecoveryDiagnostics.record("cancel=$reason")
+        resumeGate.cancel(); videoResumeJob?.cancel(); videoDeadline = null
+    }
+    private fun updateVideoRecovery() {
+        if (!resumeGate.eligible) return
+        val monitor = VideoResumeHub.state.value
+        if (!repo.settings.getBoolean("auto-resume", false) || !repo.settings.getBoolean("video-resume-compat", false) || !monitor.ready) {
+            resumeGate.clearVideo(); videoResumeJob?.cancel(); videoDeadline = null; return
+        }
+        val deadline = resumeGate.observe(monitor.sessions, SystemClock.elapsedRealtime())
+        if (deadline == videoDeadline) return
+        videoResumeJob?.cancel(); videoDeadline = deadline
+        if (deadline == null) return
+        val ticket = resumeGate.serial
+        videoResumeJob = scope.launch {
+            delay((deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0))
+            commands.withLock {
+                val current = VideoResumeHub.state.value
+                if (quiescing || !repo.currentSession() || cause != PauseCause.FOCUS || !current.ready ||
+                    !repo.settings.getBoolean("auto-resume", false) || !repo.settings.getBoolean("video-resume-compat", false)) return@withLock
+                resumeGate.observe(current.sessions, SystemClock.elapsedRealtime())
+                if (resumeGate.consumeVideo(ticket, SystemClock.elapsedRealtime())) {
+                    videoDeadline = null
+                    RecoveryDiagnostics.record("resume=video-paused")
+                    play()
+                }
+            }
+        }
+    }
     private var state = QueueState()
     private var tracks: Map<String, Track> = emptyMap()
     private var cause = PauseCause.RESTORED
@@ -129,15 +170,29 @@ class JiayinMediaService : MediaLibraryService() {
         sleepUntil = 0; sleepJob = null; retryJob = null; retryCount = 0; goingBack = false; completionKey = null
         favoriteButtonState = null; discoveryJob = null; discoveryAttempt = null; discoveryNotice = null; pendingDiscoveryNext = null
         repo = JiayinRepository.get(this).scoped(); repo.bindUpstream(); active = this
+        RecoveryDiagnostics.clear(); resumeGate.cancel(); repo.settings.registerOnSharedPreferenceChangeListener(resumePreferences)
         preloader = AccountPreloader(this, repo)
         focus = AudioFocusCoordinator(this) { change ->
             if (epoch != lifecycleEpoch || quiescing) return@AudioFocusCoordinator
+            RecoveryDiagnostics.record("focus=$change cause=${cause.name} ready=${player.playWhenReady}")
             when (change) {
-                AudioManager.AUDIOFOCUS_LOSS, AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> pause(PauseCause.FOCUS, abandon = false)
+                AudioManager.AUDIOFOCUS_LOSS, AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                    if (repo.settings.getBoolean("auto-resume", false)) resumeGate.arm(
+                        if (change == AudioManager.AUDIOFOCUS_LOSS) FocusInterruption.PERMANENT else FocusInterruption.TRANSIENT,
+                        player.playWhenReady && cause == PauseCause.NONE, SystemClock.elapsedRealtime())
+                    pause(PauseCause.FOCUS, abandon = false); updateVideoRecovery()
+                }
                 AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> player.volume = .2f
-                AudioManager.AUDIOFOCUS_GAIN -> { player.volume = 1f; if (ResumePolicy(repo.settings.getBoolean("auto-resume", false)).mayResume(cause)) play() }
+                AudioManager.AUDIOFOCUS_GAIN -> {
+                    player.volume = 1f
+                    if (repo.settings.getBoolean("auto-resume", false) && cause == PauseCause.FOCUS &&
+                        resumeGate.interruption == FocusInterruption.TRANSIENT && resumeGate.consumeStandard()) {
+                        RecoveryDiagnostics.record("resume=focus-gain"); play()
+                    }
+                }
             }
         }
+
         audioEffects = AudioEffectController(this, repo)
         player = ExoPlayer.Builder(this, audioEffects.renderers())
             .setMediaSourceFactory(DefaultMediaSourceFactory(AccountDownloads.playbackFactory(this, repo))
@@ -151,35 +206,32 @@ class JiayinMediaService : MediaLibraryService() {
                 if (epoch == lifecycleEpoch && !quiescing) audioEffects.sourceChannels(format.channelCount)
             }
         })
-        val controls = object : ForwardingPlayer(player) {
-            override fun getCurrentPosition() = absolutePosition()
-            override fun getContentPosition() = absolutePosition()
-            override fun getBufferedPosition() = player.bufferedPosition + if (offsetKey == state.current?.key) offsetMs else 0
-            override fun getContentBufferedPosition() = bufferedPosition
-            override fun getDuration(): Long = state.current?.trackId?.let { tracks[it]?.duration?.takeIf { d -> d > 0 }?.times(1000L) } ?: player.duration
-            override fun getContentDuration() = duration
-            override fun isCurrentMediaItemSeekable() = duration > 0
-            override fun getAvailableCommands(): Player.Commands = player.availableCommands.buildUpon().add(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM).apply {
-                if (state.discovery?.enabled == true) { add(Player.COMMAND_SEEK_TO_NEXT); add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM) }
-            }.build()
-            override fun getCurrentTimeline(): Timeline {
-                return object : ForwardingTimeline(player.currentTimeline) {
-                    override fun getWindow(windowIndex: Int, window: Timeline.Window, defaultPositionProjectionUs: Long): Timeline.Window {
-                        super.getWindow(windowIndex, window, defaultPositionProjectionUs)
-                        val duration = state.entries.getOrNull(windowIndex)?.trackId?.let { tracks[it]?.duration } ?: 0
-                        if (duration > 0) { window.durationUs = duration * 1_000_000L; window.isSeekable = true }
-                        return window
+        controls = SessionPlayer(player, {
+            SessionPosition(state.entries.map { (tracks[it.trackId]?.duration ?: 0) * 1000L },
+                (0 until player.mediaItemCount).map { i -> isServerSeek(player.getMediaItemAt(i)) },
+                if (state.current?.key == offsetKey) offsetMs else 0,
+                pendingSeek?.takeIf { it.first == state.current?.key }?.second, state.discovery?.enabled == true)
+        }) { action, index, position ->
+            val result = SettableFuture.create<Void>()
+            scope.launch {
+                try {
+                    commands.withLock {
+                        check(epoch == lifecycleEpoch && !quiescing && repo.currentSession()) { "Session replaced" }
+                        if (action == "seek") {
+                            if (index in state.entries.indices && index != player.currentMediaItemIndex) {
+                                cancelResume("queue-jump"); generation++; offsetKey = null; offsetMs = 0
+                                state = state.copy(index = index, positionMs = 0); player.seekTo(index, 0)
+                            }
+                            val seek = seekAbsolute(position)
+                            seek.addListener({ try { seek.get(); result.set(null) } catch (e: Exception) { result.setException(e) } }, com.google.common.util.concurrent.MoreExecutors.directExecutor())
+                        } else {
+                            when (action) { "play" -> play(); "pause" -> pause(PauseCause.USER); "stop" -> { pause(PauseCause.USER); player.stop() }; "next" -> next(); "previous" -> previous() }
+                            result.set(null)
+                        }
                     }
-                }
+                } catch (e: Exception) { result.setException(e) }
             }
-            override fun play() = control(epoch) { this@JiayinMediaService.play() }
-            override fun pause() = control(epoch) { this@JiayinMediaService.pause(PauseCause.USER) }
-            override fun setPlayWhenReady(playWhenReady: Boolean) { if (playWhenReady) play() else pause() }
-            override fun seekToNextMediaItem() = control(epoch) { next() }
-            override fun seekToNext() = control(epoch) { next() }
-            override fun seekToPreviousMediaItem() = control(epoch) { previous() }
-            override fun seekToPrevious() = control(epoch) { previous() }
-            override fun seekTo(positionMs: Long) = control(epoch) { seekAbsolute(positionMs) }
+            result
         }
         val intent = Intent(this, JiayinActivity::class.java).setAction("jiayin.player")
         session = MediaLibrarySession.Builder(this, controls, Callback())
@@ -196,6 +248,7 @@ class JiayinMediaService : MediaLibraryService() {
                     val index = p.currentMediaItemIndex.coerceAtLeast(0)
                     val key = state.entries.getOrNull(index)?.key
                     if (key != lastKey) {
+                        cancelResume("track-change"); pendingSeek = null; seekTask?.cancel()
                         flushListening(completed = transitionReason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO)
                         val history = if (!goingBack && lastKey != null) (state.history + lastKey!!).takeLast(2000) else state.history
                         state = state.copy(index = index, positionMs = 0, history = history)
@@ -235,6 +288,7 @@ class JiayinMediaService : MediaLibraryService() {
         })
         ContextCompat.registerReceiver(this, noisy, IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY), ContextCompat.RECEIVER_NOT_EXPORTED)
         getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(network)
+        scope.launch { VideoResumeHub.state.collect { updateVideoRecovery() } }
         scope.launch {
             PlaybackHub.metadataRevision.collect {
                 if (!quiescing && repo.currentSession()) {
@@ -312,8 +366,13 @@ class JiayinMediaService : MediaLibraryService() {
         if (com.eddyizm.tempus.BuildConfig.DEBUG) android.util.Log.d("JiayinSession", "notification foreground=$startInForegroundRequired state=${player.playbackState}")
         if (resourcesOpen && !quiescing && !sessionReleased && session === this.session && repo.currentSession()) super.onUpdateNotification(session, startInForegroundRequired)
     }
-    private fun absolutePosition() = player.currentPosition.coerceAtLeast(0) + if (state.current?.key == offsetKey) offsetMs else 0
-    private fun publish() { if (quiescing || !repo.currentSession()) return; audioEffects.refresh(tracks[state.current?.trackId]); updateFavoriteButton(); PlaybackHub.mutable.value = PlaybackState(state.copy(positionMs = if (player.mediaItemCount > 0) absolutePosition() else state.positionMs), state.current?.trackId?.let { tracks[it] }, player.isPlaying, player.playbackState == Player.STATE_BUFFERING, cause, error, true, sleepUntil, discoveryNotice) }
+    private fun absolutePosition() = pendingSeek?.takeIf { it.first == state.current?.key }?.second
+        ?: (player.currentPosition.coerceAtLeast(0) + if (state.current?.key == offsetKey) offsetMs else 0)
+    private fun isServerSeek(item: MediaItem?): Boolean {
+        val uri = item?.localConfiguration?.uri ?: return false
+        return uri.scheme == "jiayin-stream" && uri.getQueryParameter("format")?.let { it != "raw" } == true
+    }
+    private fun publish() { if (quiescing || !repo.currentSession()) return; audioEffects.refresh(tracks[state.current?.trackId]); if (::controls.isInitialized) controls.refresh(); updateFavoriteButton(); PlaybackHub.mutable.value = PlaybackState(state.copy(positionMs = if (player.mediaItemCount > 0) absolutePosition() else state.positionMs), state.current?.trackId?.let { tracks[it] }, player.isPlaying, player.playbackState == Player.STATE_BUFFERING, cause, error, true, sleepUntil, discoveryNotice) }
     private fun updateFavoriteButton() {
         if (!::session.isInitialized) return
         val t = tracks[state.current?.trackId]
@@ -338,6 +397,7 @@ class JiayinMediaService : MediaLibraryService() {
     }
     private fun child(track: Track) = Child(track.id, title = track.title, album = track.album, artist = track.artist, coverArtId = track.cover.ifBlank { null }, duration = track.duration, genre = track.genre, albumId = track.albumId, artistId = track.artistId)
     private suspend fun install(next: QueueState, start: Boolean) {
+        cancelResume("new-queue"); pendingSeek = null; seekTask?.cancel()
         discoveryAttempt = null; discoveryNotice = null; pendingDiscoveryNext = null
         val request = commandNumber.incrementAndGet()
         val map = withContext(Dispatchers.IO) { repo.library().tracks.associateBy { it.id } }
@@ -366,22 +426,25 @@ class JiayinMediaService : MediaLibraryService() {
     }
     private fun play() {
         if (quiescing || !repo.currentSession() || player.mediaItemCount == 0) return
+        cancelResume("play-command")
         retryJob?.cancel(); error = null; retryCount = 0
         // Android 15+ requires a top app or a foreground service to request focus.
         // Reuse Media3's notification rather than creating a second notification.
         runCatching { foregroundImmediately() }.onFailure {
-            cause = PauseCause.USER; error = "请打开家音后点播放"; publish(); return
+            RecoveryDiagnostics.record("resume=blocked-background"); cause = PauseCause.USER; error = "请打开家音后点播放"; publish(); return
         }
-        if (!focus.request()) { cause = PauseCause.FOCUS; error = "其他应用正在使用声音，稍后再点播放"; publish(); return }
+        if (!runCatching { focus.request() }.getOrDefault(false)) { RecoveryDiagnostics.record("resume=focus-denied"); cause = PauseCause.FOCUS; error = "其他应用正在使用声音，稍后再点播放"; publish(); return }
         if (player.playerError != null || player.playbackState == Player.STATE_IDLE) {
             val expected = generation; scope.launch { recover(expected, explicit = true) }; return
         }
         if (player.playbackState == Player.STATE_ENDED) seekAbsolute(0)
-        cause = PauseCause.NONE; player.volume = 1f; player.play(); publish(); preload()
+        cause = PauseCause.NONE; player.volume = 1f; player.play(); RecoveryDiagnostics.record("play=accepted"); publish(); preload()
     }
     private fun pause(why: PauseCause, abandon: Boolean = true) {
         // Late focus callbacks must never overwrite a deliberate pause/headset loss.
         if (why == PauseCause.FOCUS && !player.playWhenReady && cause != PauseCause.NONE) return
+        if (why != PauseCause.FOCUS) cancelResume(why.name)
+        pendingSeek = null; seekTask?.cancel()
         cause = why; pendingDiscoveryNext = null; retryJob?.cancel(); generation++; flushListening(); player.pause()
         if (abandon) focus.abandon()
         persist(); publish()
@@ -403,17 +466,34 @@ class JiayinMediaService : MediaLibraryService() {
         if (index >= 0) { state = state.copy(history = state.history.dropLast(1)); goingBack = true; player.seekTo(index, 0) } else seekAbsolute(0)
         play()
     }
-    private fun seekAbsolute(position: Long) {
-        if (quiescing || !repo.currentSession()) return
-        generation++; retryJob?.cancel()
-        val target = position.coerceIn(0, ((state.current?.trackId?.let { tracks[it]?.duration } ?: Int.MAX_VALUE).toLong() * 1000 - 1).coerceAtLeast(0))
-        val currentOffset = if (offsetKey == state.current?.key) offsetMs else 0
-        val uri = player.currentMediaItem?.localConfiguration?.uri
-        val transcoded = uri?.scheme == "jiayin-stream" && uri.getQueryParameter("format")?.let { it != "raw" } == true
-        if (transcoded && !AccountDownloads.downloaded(this, repo.account, state.current?.trackId.orEmpty())) {
-            val wasPlaying = player.playWhenReady; scope.launch { restartAt(target, wasPlaying) }
-        } else player.seekTo((target - currentOffset).coerceAtLeast(0))
+    private fun seekAbsolute(position: Long): ListenableFuture<Void?> {
+        val key = state.current?.key ?: return Futures.immediateVoidFuture()
+        val duration = if (!isServerSeek(player.currentMediaItem) && player.duration > 0) player.duration
+            else (tracks[state.current?.trackId]?.duration ?: 0) * 1000L
+        val target = position.coerceAtLeast(0).let { if (duration > 0) it.coerceAtMost(duration - 1) else it }
+        generation++; val expected = generation; retryJob?.cancel(); seekTask?.cancel()
+        val result = SettableFuture.create<Void>()
+        val wasPlaying = player.playWhenReady || (pendingSeek != null && cause == PauseCause.NONE)
+        if (isServerSeek(player.currentMediaItem) && !AccountDownloads.downloaded(this, repo.account, state.current?.trackId.orEmpty())) {
+            pendingSeek = key to target; player.pause()
+            seekTask = scope.launch {
+                try {
+                    restartAt(target, wasPlaying, expected)
+                    if (generation == expected) { pendingSeek = null; persist(); publish() }
+                    result.set(null)
+                } catch (e: CancellationException) { result.cancel(false) }
+                catch (e: Exception) {
+                    if (generation == expected) { pendingSeek = null; error = "跳转失败，请重试"; publish() }
+                    result.setException(e)
+                }
+            }
+        } else {
+            pendingSeek = null
+            player.seekTo((target - if (offsetKey == key) offsetMs else 0).coerceAtLeast(0))
+            result.set(null)
+        }
         state = state.copy(positionMs = target); persist(); publish()
+        return result
     }
     private suspend fun recover(expected: Long, explicit: Boolean = false) {
         if (generation != expected || (!explicit && cause != PauseCause.NETWORK) || state.current == null) return
@@ -421,12 +501,11 @@ class JiayinMediaService : MediaLibraryService() {
         retryCount++
         restartAt(absolutePosition(), true)
     }
-    private suspend fun restartAt(position: Long, resume: Boolean) {
+    private suspend fun restartAt(position: Long, resume: Boolean, expected: Long = generation) {
         val key = state.current?.key ?: return
         val index = player.currentMediaItemIndex
         player.currentMediaItem ?: return
         val track = tracks[state.current?.trackId] ?: return
-        val expected = generation
         val item = withContext(Dispatchers.IO) { AccountDownloads.mediaItem(this@JiayinMediaService, repo, track) }
         if (generation != expected || state.current?.key != key) return
         val uri = item.localConfiguration?.uri ?: return
@@ -622,7 +701,7 @@ class JiayinMediaService : MediaLibraryService() {
                     val entries = keys.map { byKey.getValue(it) }; editQueue(state.copy(entries = entries, index = entries.indexOfFirst { it.key == state.current?.key }))
                 }
             }
-            "foreground" -> if (ResumePolicy(repo.settings.getBoolean("auto-resume", false)).mayResume(cause)) play()
+            "foreground" -> if (repo.settings.getBoolean("auto-resume", false) && cause == PauseCause.FOCUS && args.getLong("enteredAt", 0) > resumeGate.interruptedAt && resumeGate.consumeStandard()) { RecoveryDiagnostics.record("resume=foreground"); play() }
             "sleep" -> {
                 sleepJob?.cancel(); val minutes = args.getInt("minutes")
                 sleepUntil = if (minutes > 0) System.currentTimeMillis() + minutes * 60_000L else 0
@@ -635,6 +714,7 @@ class JiayinMediaService : MediaLibraryService() {
     private fun disposePlayback() {
         if (!resourcesOpen) return
         resourcesOpen = false; lifecycleEpoch++
+        cancelResume("service-close"); repo.settings.unregisterOnSharedPreferenceChangeListener(resumePreferences)
         preloader?.cancel(); QueuePreloader.cancel(); focus.abandon()
         unregisterReceiver(noisy); getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(network)
         audioEffects.close(); releaseSession(); player.release()

@@ -79,7 +79,21 @@ class PlaylistInteractionTest {
     private fun nodes(): List<AccessibilityNodeInfo> { ins.uiAutomation.clearCache(); val root = ins.uiAutomation.rootInActiveWindow ?: return emptyList(); val all = mutableListOf<AccessibilityNodeInfo>(); val q = ArrayDeque<AccessibilityNodeInfo>(); q.add(root); while(q.isNotEmpty()) { val n=q.removeFirst(); all.add(n); repeat(n.childCount) { n.getChild(it)?.let(q::add) } }; return all }
     private fun node(label: String): AccessibilityNodeInfo { repeat(50) { nodes().firstOrNull { (it.text?.toString() == label || it.contentDescription?.toString() == label) && it.isVisibleToUser }?.let { return it }; SystemClock.sleep(100) }; error("Missing $label: ${nodes().mapNotNull { it.text ?: it.contentDescription }}") }
     private fun bounds(n: AccessibilityNodeInfo) = Rect().also(n::getBoundsInScreen)
-    private fun click(label: String) { val r=bounds(node(label)); tap(r.centerX().toFloat(), r.centerY().toFloat()) }
+    private fun click(label: String) {
+        // A sheet exposes semantics before its entrance animation settles. Re-read
+        // its native bounds instead of tapping the coordinates of a moving label.
+        var previous = bounds(node(label))
+        var stable = 0
+        val deadline = SystemClock.elapsedRealtime() + 5000
+        while (stable < 3) {
+            check(SystemClock.elapsedRealtime() < deadline) { "Moving control: $label" }
+            SystemClock.sleep(100)
+            val current = bounds(node(label))
+            stable = if (current == previous) stable + 1 else 0
+            previous = current
+        }
+        tap(previous.centerX().toFloat(), previous.centerY().toFloat())
+    }
     private fun more(title: String) {
         val y = bounds(node(title)).centerY()
         val icon = nodes().filter { it.contentDescription?.toString() == "歌曲操作" && it.isVisibleToUser }.minBy { kotlin.math.abs(bounds(it).centerY() - y) }

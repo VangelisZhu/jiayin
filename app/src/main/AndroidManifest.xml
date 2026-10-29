@@ -43,6 +43,11 @@
             </intent-filter>
         </service>
 
+        <service android:name=".jiayin.playback.VideoResumeListener" android:label="家音 · 视频恢复兼容"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" android:exported="true">
+            <intent-filter><action android:name="android.service.notification.NotificationListenerService" /></intent-filter>
+        </service>
+
         <!-- Declare that this session demo supports Android Auto. -->
         <meta-data
             android:name="com.google.android.gms.car.application"

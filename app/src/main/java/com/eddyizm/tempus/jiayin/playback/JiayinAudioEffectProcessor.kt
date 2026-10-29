@@ -30,6 +30,8 @@ class JiayinAudioEffectProcessor : BaseAudioProcessor() {
     private var fadeFrames = 1
     private val before = DoubleArray(2)
     private val after = DoubleArray(2)
+    @Volatile var inputFrames: Long = 0; private set
+    @Volatile var lastInputMs: Long = 0; private set
     private var failed = false
     init {
         scope.launch {
@@ -60,6 +62,8 @@ class JiayinAudioEffectProcessor : BaseAudioProcessor() {
     override fun queueInput(inputBuffer: ByteBuffer) {
         if (!inputBuffer.hasRemaining()) return
         val format = formats.value
+        inputFrames += inputBuffer.remaining() / (format.channels.coerceAtLeast(1) * 2)
+        lastInputMs = android.os.SystemClock.elapsedRealtime()
         val output = replaceOutputBuffer(inputBuffer.remaining()).order(ByteOrder.nativeOrder())
         if (format.channels !in 1..2 || format.encoding != C.ENCODING_PCM_16BIT || failed) {
             output.put(inputBuffer); output.flip(); return

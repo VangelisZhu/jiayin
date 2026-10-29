@@ -74,6 +74,7 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
     private val artistRequests = mutableSetOf<String>()
     private var discoveryJob: Job? = null
     private var syncJob: Job? = null
+    private var syncManualRequested = false
     private var lastCorrectionCheck = 0L
     private var lastOutboxCheck = 0L
     var selectedCollection: MusicList? = null
@@ -114,7 +115,7 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
         future.addListener({ if (expected != repo.session || frozen || future !== controllerFuture) { MediaController.releaseFuture(future); return@addListener }; runCatching {
             controller = future.get()
             while (pendingCommands.isNotEmpty()) send(pendingCommands.removeFirst())
-            command("foreground")
+            command("foreground") { putLong("enteredAt", lastForegroundAt) }
         }.onFailure { message("播放服务连接失败：${it.cause?.message ?: it.message}"); controllerFuture = null } }, ContextCompat.getMainExecutor(getApplication()))
     }
     suspend fun refreshLocal() {
@@ -253,15 +254,16 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
     }
     private fun autoSync() { if (!frozen && repo.configured && !repo.offline) sync(automatic = true) }
     fun sync(automatic: Boolean = false): Job {
-        syncJob?.takeIf { it.isActive }?.let { return it }
+        syncJob?.takeIf { it.isActive }?.let { if (!automatic) syncManualRequested = true; return it }
+        syncManualRequested = !automatic
         val fixedRepo = repo
         return task {
             if (!fixedRepo.currentSession() || fixedRepo.offline) return@task
             if (automatic) {
                 val due = withContext(Dispatchers.IO) { fixedRepo.syncPolicy().due(System.currentTimeMillis()) }
-                if (!due) return@task
+                if (!due && !syncManualRequested) return@task
                 val manager = getApplication<Application>().getSystemService(android.net.ConnectivityManager::class.java)
-                if (manager.activeNetwork == null) return@task
+                if (manager.activeNetwork == null && !syncManualRequested) return@task
             }
             mutable.update { it.copy(loading = true, syncing = true, status = "正在更新曲库") }
             try {
@@ -271,12 +273,12 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
                     try { ManagerCorrections(fixedRepo).refresh(); OwnershipRepository(fixedRepo).refresh() } catch (e: CancellationException) { throw e } catch (_: Exception) { /* Optional metadata does not invalidate a complete library. */ }
                 }
                 refreshLocal(); mutable.update { it.copy(connection = "已连接 NAS", status = "曲库已更新") }
-                if (!automatic) message("曲库已更新")
+                if (syncManualRequested) message("曲库已更新")
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) {
                 withContext(Dispatchers.IO) { fixedRepo.put("sync-meta", "failed", System.currentTimeMillis()) }
                 mutable.update { it.copy(connection = "更新失败 · 保留上次曲库", status = "更新失败：${e.message ?: "请检查连接"}") }
-                if (!automatic) throw e
+                if (syncManualRequested) throw e
             } finally { if (fixedRepo.currentSession()) mutable.update { it.copy(loading = false, syncing = false) } }
         }.also { syncJob = it }
     }
@@ -304,9 +306,11 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
             if (result.get().resultCode != androidx.media3.session.SessionResult.RESULT_SUCCESS) message("播放操作未完成，请重试")
         }.onFailure { message("播放服务连接已断开，请重新点播放"); controller = null; controllerFuture = null } }, ContextCompat.getMainExecutor(getApplication()))
     }
-    fun foreground() {
+    private var lastForegroundAt = 0L
+    fun foreground(userReturn: Boolean = false) {
+        if (userReturn) lastForegroundAt = android.os.SystemClock.elapsedRealtime()
         if (!frozen && repo.configured) {
-            connect(); if (controller != null) command("foreground")
+            connect(); if (controller != null) command("foreground") { putLong("enteredAt", lastForegroundAt) }
             autoSync()
             if (!repo.offline && System.currentTimeMillis() - lastOutboxCheck > 30_000) {
                 lastOutboxCheck = System.currentTimeMillis()
