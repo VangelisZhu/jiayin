@@ -46,7 +46,7 @@ class LyricsRepository(private val repo: JiayinRepository, private val online: L
     private suspend fun repair(track: Track, value: Lyrics, force: Boolean): Lyrics {
         if (!LyricRepairPolicy.damaged(value)) return value
         if (!LyricRepairPolicy.inspect(value).originalBroken) return LyricRepairPolicy.display(value)
-        if (!repo.settings.getBoolean("auto-repair-lyrics", true))
+        if (!repo.settings.getBoolean("auto-repair-lyrics", false))
             return LyricRepairPolicy.display(value, "原文编码异常，可手动联网匹配")
         val key = "${LyricRepairPolicy.PROCESSING_VERSION}:${track.id}:${LyricsEngine.originalHash(value)}"
         val previous = repo.dao.get(repo.account, "lyrics-repair-attempt", key)

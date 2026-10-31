@@ -127,6 +127,7 @@ class JiayinMediaService : MediaLibraryService() {
         }
     }
     private var state = QueueState()
+    private var queueLoaded = false
     private var tracks: Map<String, Track> = emptyMap()
     private var cause = PauseCause.RESTORED
     private var error: String? = null
@@ -165,7 +166,7 @@ class JiayinMediaService : MediaLibraryService() {
         storage = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
         lifecycleEpoch++; val epoch = lifecycleEpoch
         resourcesOpen = true; quiescing = false; sessionReleased = false
-        state = QueueState(); tracks = emptyMap(); cause = PauseCause.RESTORED; error = null; installing = false
+        state = QueueState(); queueLoaded = false; tracks = emptyMap(); cause = PauseCause.RESTORED; error = null; installing = false
         generation++; lastKey = null; offsetKey = null; offsetMs = 0; heardMs = 0; heardThisPlay = 0; lastTick = 0
         sleepUntil = 0; sleepJob = null; retryJob = null; retryCount = 0; goingBack = false; completionKey = null
         favoriteButtonState = null; discoveryJob = null; discoveryAttempt = null; discoveryNotice = null; pendingDiscoveryNext = null
@@ -316,6 +317,7 @@ class JiayinMediaService : MediaLibraryService() {
             commands.withLock {
                 val restored = withContext(Dispatchers.IO) { tracks = repo.library().tracks.associateBy { it.id }; repo.get("queue", "active", QueueState::class.java) }
                 if (state.entries.isEmpty() && restored != null) install(restored, false)
+                queueLoaded = true
                 publish()
             }
             while (isActive) {
@@ -386,7 +388,13 @@ class JiayinMediaService : MediaLibraryService() {
         session.setMediaButtonPreferences(listOf(button))
         session.setCustomLayout(listOf(button)) // Compatibility with controllers before Android 13.
     }
-    private fun persist() { val snapshot = state.copy(positionMs = if (player.mediaItemCount > 0) absolutePosition() else state.positionMs); storage.launch { repo.put("queue", "active", snapshot) } }
+    private fun persist() {
+        // System pause/shutdown callbacks can arrive before startup IO has restored the queue.
+        // The initial empty state is not a user edit and must never replace the saved queue.
+        if (!queueLoaded) return
+        val snapshot = state.copy(positionMs = if (player.mediaItemCount > 0) absolutePosition() else state.positionMs)
+        storage.launch { repo.put("queue", "active", snapshot) }
+    }
     private fun flushListening(completed: Boolean = false, skip: Boolean = false) {
         val id = state.current?.trackId ?: return
         val elapsed = heardMs; heardMs = 0
@@ -407,7 +415,7 @@ class JiayinMediaService : MediaLibraryService() {
         val items = withContext(Dispatchers.IO) { valid.map { AccountDownloads.mediaItem(this@JiayinMediaService, repo, map.getValue(it.trackId)) }.toMutableList() }
         if (request != commandNumber.get()) return
         flushListening(); installing = true
-        tracks = map; state = next.copy(entries = valid, index = targetIndex)
+        tracks = map; state = next.copy(entries = valid, index = targetIndex); queueLoaded = true
         offsetMs = 0; offsetKey = null; generation++; retryCount = 0; retryJob?.cancel(); error = null
         if (lastKey != state.current?.key) { heardThisPlay = 0; completionKey = null }
         lastKey = state.current?.key

@@ -26,8 +26,8 @@ import kotlinx.coroutines.launch
     val state by vm.servers.collectAsState()
     val home by vm.state.collectAsState()
     val active = if (home.configured) vm.repo.account else null
-    var editing by remember { mutableStateOf<ServerProfile?>(null) }
-    var add by remember { mutableStateOf(false) }
+
+
     var menu by remember { mutableStateOf<ServerProfile?>(null) }
     var rename by remember { mutableStateOf<ServerProfile?>(null) }
     var logout by remember { mutableStateOf<ServerProfile?>(null) }
@@ -35,7 +35,7 @@ import kotlinx.coroutines.launch
     val scope = rememberCoroutineScope()
     LaunchedEffect(Unit) { vm.refreshServers() }
     LazyColumn(Modifier.fillMaxSize().then(if (allowBack) Modifier else Modifier.safeDrawingPadding()), contentPadding = PaddingValues(bottom = 24.dp)) {
-        item { PageTitle("音乐服务器", "你的音乐，各自安放", if (allowBack) back else null) { IconAction(R.drawable.ic_add, "添加服务器") { if (!state.busy) add = true } } }
+        item { PageTitle("音乐服务器", "你的音乐，各自安放", if (allowBack) back else null) { IconAction(R.drawable.ic_add, "添加服务器") { if (!state.busy) vm.openServerEditor() } } }
         item { Text("切换会暂停当前播放和下载，保留进度。", Modifier.padding(horizontal = 24.dp, vertical = 8.dp), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         if (state.busy) item { Column(Modifier.padding(horizontal = 24.dp, vertical = 10.dp)) { LinearProgressIndicator(Modifier.fillMaxWidth()); Text(state.status, Modifier.padding(top = 8.dp), fontSize = 13.sp) } }
         if (state.error != null) item { Surface(Modifier.padding(horizontal = 20.dp, vertical = 8.dp), color = MaterialTheme.colorScheme.errorContainer, shape = RoundedCornerShape(16.dp)) { Text(state.error.orEmpty(), Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onErrorContainer) } }
@@ -64,13 +64,13 @@ import kotlinx.coroutines.launch
                         Text("手机下载 ${size?.count ?: 0} 首 · ${(size?.bytes ?: 0) / 1024 / 1024} MB${if ((size?.pending ?: 0) > 0) " · ${size?.pending} 项待同步" else ""}", Modifier.padding(top = 5.dp), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         if (current && vm.repo.offline) TextButton({ vm.switchServer(profile) }, enabled = !state.busy) { Text("连接并同步") }
                         if (!current) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                            TextButton({ if (profile.authenticated) vm.switchServer(profile) else editing = profile }, enabled = !state.busy) { Text(if (profile.authenticated) "切换" else "重新登录") }
+                            TextButton({ if (profile.authenticated) vm.switchServer(profile) else vm.openServerEditor(profile) }, enabled = !state.busy) { Text(if (profile.authenticated) "切换" else "重新登录") }
                         }
                     }
                 }
             }
         }
-        item { OutlinedButton({ add = true }, Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 20.dp), enabled = !state.busy) { Text("＋ 添加音乐服务器") } }
+        item { OutlinedButton({ vm.openServerEditor() }, Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 20.dp), enabled = !state.busy) { Text("＋ 添加音乐服务器") } }
         if (!home.configured) item { Text("选择已保存的服务器，或连接新的 Navidrome / Subsonic 服务。退出过的账户需重新登录。", Modifier.padding(horizontal = 24.dp), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
     }
     menu?.let { profile ->
@@ -78,36 +78,11 @@ import kotlinx.coroutines.launch
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 TextButton({ menu = null; rename = profile }) { Text("重命名") }
                 if (profile.authenticated) TextButton({ menu = null; vm.testServer(profile) }) { Text("测试连接") }
-                TextButton({ menu = null; editing = profile }) { Text("重新登录") }
+                TextButton({ menu = null; vm.openServerEditor(profile) }) { Text(if (profile.authenticated) "编辑连接" else "重新登录") }
                 if (profile.authenticated) TextButton({ menu = null; logout = profile }) { Text("退出登录") }
                 TextButton({ menu = null; remove = profile }) { Text("移除账户及本地数据", color = MaterialTheme.colorScheme.error) }
             }
         }, confirmButton = { TextButton({ menu = null }) { Text("关闭") } })
-    }
-    if (add || editing != null) {
-        val original = editing
-        var name by remember(original) { mutableStateOf(original?.name.orEmpty()) }
-        var address by remember(original) { mutableStateOf(original?.address.orEmpty()) }
-        var username by remember(original) { mutableStateOf(original?.username.orEmpty()) }
-        var password by remember { mutableStateOf("") }
-        val ready = address.isNotBlank() && username.isNotBlank() && password.isNotEmpty() && !state.busy
-        fun save(activate: Boolean) {
-            scope.launch {
-                vm.saveServer(address, username, password, name, activate || original?.id == active).join()
-                if (vm.servers.value.error == null) { password = ""; add = false; editing = null }
-            }
-        }
-        AlertDialog(onDismissRequest = { if (!state.busy) { add = false; editing = null } }, title = { Text(if (original == null) "添加音乐服务器" else "重新登录") }, text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedTextField(name, { name = it }, label = { Text("名称（可选）") }, singleLine = true)
-                OutlinedTextField(address, { address = it }, label = { Text("服务器地址") }, placeholder = { Text("https://music.example.com") }, singleLine = true, readOnly = original != null)
-                OutlinedTextField(username, { username = it }, label = { Text("账户") }, singleLine = true, readOnly = original != null)
-                OutlinedTextField(password, { password = it }, label = { Text("密码") }, singleLine = true, visualTransformation = PasswordVisualTransformation())
-                Text("认证信息加密保存在本机。不同地址及不同账户分别保存。", fontSize = 12.sp)
-            }
-        }, confirmButton = { TextButton({ save(true) }, enabled = ready) { Text("保存并切换") } }, dismissButton = {
-            FlowRow { TextButton({ add = false; editing = null }) { Text("取消") }; TextButton({ save(false) }, enabled = ready) { Text("仅保存") } }
-        })
     }
     rename?.let { profile ->
         var name by remember(profile) { mutableStateOf(profile.name) }

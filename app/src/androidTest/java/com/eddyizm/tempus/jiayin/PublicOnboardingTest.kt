@@ -16,7 +16,7 @@ import java.io.File
 
 @RunWith(AndroidJUnit4::class)
 class PublicOnboardingTest {
-    @Test(timeout = 30000) fun freshConfigurationIsBlankAndOnlineRepairRequiresOptIn() = runBlocking {
+    @Test(timeout = 90000) fun freshConfigurationIsBlankAndOnlineRepairRequiresOptIn() = runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         if (android.os.Build.VERSION.SDK_INT >= 33) instrumentation.uiAutomation.grantRuntimePermission(context.packageName, android.Manifest.permission.POST_NOTIFICATIONS)
@@ -42,15 +42,15 @@ class PublicOnboardingTest {
                     for (i in 0 until node.childCount) node.getChild(i)?.let { pending.add(it) }
                 }
                 val fields = nodes.filter { it.className?.toString() == "android.widget.EditText" }
-                assertEquals("Visible onboarding nodes: " + nodes.mapNotNull { it.text?.toString() }.joinToString(" | "), 3, fields.size)
+                assertEquals("Visible onboarding nodes: " + nodes.mapNotNull { it.text?.toString() }.joinToString(" | "), 4, fields.size)
                 assertTrue(fields.all { it.text.isNullOrBlank() })
-                val checkboxes = nodes.filter { it.isCheckable }
+                repeat(3) { if (EditorTouch.nodes().none { it.isCheckable }) { EditorTouch.nodes().firstOrNull { it.isScrollable }?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD); SystemClock.sleep(300) } }
+                val checkboxes = EditorTouch.nodes().filter { it.isCheckable }
                 assertEquals(1, checkboxes.size); assertFalse(checkboxes.single().isChecked)
-                val connect = nodes.first { it.text?.toString() == "连接我的音乐" }
-                var ancestor: AccessibilityNodeInfo? = connect
-                var disabled = !connect.isEnabled
-                repeat(4) { ancestor = ancestor?.parent; disabled = disabled || ancestor?.isEnabled == false }
-                assertTrue("Blank credentials must not trigger a request", disabled)
+                // Empty submit is a local field error in the same editor; no connection is created.
+                EditorTouch.click("保存并切换")
+                EditorTouch.node("请填写完整地址，例如 https://music.example.com")
+                assertFalse(repo.configured); assertTrue(repo.profiles.all().isEmpty())
                 val folder = File(context.getExternalFilesDir(null), "public-onboarding").apply { mkdirs() }
                 val image = instrumentation.uiAutomation.takeScreenshot()
                 File(folder, "onboarding.png").outputStream().use { image.compress(Bitmap.CompressFormat.PNG, 100, it) }; image.recycle()

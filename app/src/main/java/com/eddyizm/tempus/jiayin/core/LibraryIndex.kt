@@ -7,7 +7,7 @@ import java.util.Locale
 data class SearchReturnLocation(val route: String, val previous: String, val collection: MusicList?, val parent: MusicList?, val category: String, val folder: String, val entryFolder: String? = null)
 data class BrowseLocation(val category: String = "专辑", val path: String = "", val request: Long = 0)
 enum class SearchKind(val label: String) { ALL("全部"), SONGS("歌曲"), ARTISTS("歌手"), ALBUMS("专辑"), PLAYLISTS("歌单"), FOLDERS("文件夹") }
-@Keep data class SearchScope(val kind: SearchKind = SearchKind.ALL, val folder: String? = null, val artist: String? = null, val region: String = "全部", val artistType: String = "全部") {
+@Keep data class SearchScope(val kind: SearchKind = SearchKind.ALL, val folder: String? = null, val artist: String? = null, val region: String = "全部", val artistType: String = "全部", val originalPerformer: Boolean = false) {
     val label get() = when { folder != null -> "当前目录及子目录"; artist != null -> "当前歌手作品"; else -> listOfNotNull(region.takeUnless { it == "全部" }, artistType.takeUnless { it == "全部" }, kind.label.takeUnless { kind == SearchKind.ALL }).joinToString(" · ").ifBlank { "全部曲库" } }
 }
 @Keep data class SearchHistory(val query: String, val time: Long)
@@ -62,7 +62,7 @@ class LibraryIndex private constructor(
     fun matchesTrack(id: String, scope: SearchScope): Boolean {
         val t = tracks[id] ?: return false
         val effectiveArtists = ArtistOwnership.artists(t, ownership).map { it.key }
-        return (scope.artist == null || scope.artist in effectiveArtists) &&
+        return (scope.artist == null || scope.artist in (if (scope.originalPerformer) t.artistKeys() else effectiveArtists)) &&
             (scope.folder == null || DirectoryRegions.contains(scope.folder, DirectoryRegions.directory(t.path))) &&
             (scope.region == "全部" || regions[id] == scope.region) &&
             (scope.artistType == "全部" || effectiveArtists.any { artistTypes[it] == scope.artistType })

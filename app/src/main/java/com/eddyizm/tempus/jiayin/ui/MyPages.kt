@@ -103,7 +103,7 @@ import kotlinx.coroutines.withContext
         }
         item { ListItem(headlineContent = { Text("播放缓存 · 2 GB 上限") }, supportingContent = { Text("已用 ${cacheSize / 1024 / 1024} MB；明确下载的音乐单独保留。") }, trailingContent = { TextButton({ scope.launch { withContext(Dispatchers.IO) { val cache = DownloadUtil.getStreamingCacheForPreload(context); cache.keys.toList().forEach { cache.removeResource(it) } }; cacheSize = 0; vm.message("播放缓存已清空") } }, enabled = !playback.playing) { Text("清空") } }) }
         item { SectionTitle("双语歌词 / DeepL") }
-        item { SettingToggle("乱码歌词自动联网修复", "开启后，仅发现乱码时向 LRCLIB 发送歌名与歌手。关闭后仍可手动匹配；不改动服务器歌词。", "auto-repair-lyrics", true, vm) }
+        item { SettingToggle("乱码歌词自动联网修复", "开启后，仅发现乱码时向 LRCLIB 发送歌名与歌手。关闭后仍可手动匹配；不改动服务器歌词。", "auto-repair-lyrics", false, vm) }
         item { Text("已有原词与译词会优先使用。手动翻译会把当前歌曲的原词发送给 DeepL，使用你自己的额度；密钥由 Android Keystore 加密保存。", Modifier.padding(horizontal = 24.dp), fontSize = 12.sp, lineHeight = 20.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         item { OutlinedTextField(apiKey, { apiKey = it }, Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp), label = { Text(if (storedKey) "已保存密钥，填写可替换" else "DeepL API 密钥") }, singleLine = true, visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation()) }
         item { SettingToggle("使用 DeepL API Free", "付费 API Pro 账户请关闭此项。", "deepl-free", true, vm) }

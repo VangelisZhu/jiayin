@@ -152,10 +152,10 @@ object AccountDownloads {
         return added
     }
 
-    suspend fun pauseAndAwait(context: Context, account: String) {
+    suspend fun pauseAndAwait(context: Context, account: String, pauseScheduler: Boolean = true) {
         val manager = withContext(Dispatchers.Main.immediate) { DownloadUtil.getDownloadManager(context).also { m ->
             owners(context, account).forEach { m.setStopReason(it.requestId, 1) }
-            m.pauseDownloads()
+            if (pauseScheduler) m.pauseDownloads()
         } }
         withTimeout(15_000) {
             while (true) {
@@ -169,7 +169,7 @@ object AccountDownloads {
         val manager = DownloadUtil.getDownloadManager(context)
         val selected = owners(context, account).filter { id == null || it.requestId == id }
         selected.forEach { manager.setStopReason(it.requestId, if (paused) 1 else 0) }
-        if (paused && id == null) manager.pauseDownloads()
+        if (paused && id == null && ServerProfiles(context).active()?.profile?.id == account) manager.pauseDownloads()
         if (!paused) manager.resumeDownloads()
     }
     suspend fun footprint(context: Context, account: String): AccountFootprint = withContext(Dispatchers.IO) {

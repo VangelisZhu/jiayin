@@ -32,6 +32,7 @@ data class HomeState(
     val library: Library = Library(), val records: Map<String, Listening> = emptyMap(),
     val artists: Map<String, ArtistProfile> = emptyMap(), val topSongs: Map<String, List<String>> = emptyMap(),
     val index: LibraryIndex = LibraryIndex.EMPTY, val regionRules: List<PathRegionRule> = emptyList(),
+    val personalOwnership: Set<String> = emptySet(),
     val recommendations: List<Recommendation> = emptyList(), val downloads: List<DownloadInfo> = emptyList(),
     val pending: Int = 0, val uncertain: Int = 0, val connection: String = "尚未测试连接", val message: String? = null, val lyrics: Lyrics? = null,
     val lyricsBusy: Boolean = false, val lyricMatches: List<LyricMatch> = emptyList(),
@@ -47,6 +48,82 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
     val sessionRevision = sessionMutable.asStateFlow()
     private val serversMutable = MutableStateFlow(ServerUiState())
     val servers = serversMutable.asStateFlow()
+    private val editorMutable = MutableStateFlow<ServerEditorState?>(null)
+    val serverEditor = editorMutable.asStateFlow()
+    private var editorJob: Job? = null
+    private var editorClient: JiayinRepository? = null
+    private var editorRevision = 0L
+    fun openServerEditor(profile: ServerProfile? = null) {
+        if (switching || editorMutable.value?.committing == true) return
+        closeServerEditor()
+        editorMutable.value = ServerEditorState(ServerDraft(profile?.id, profile?.name.orEmpty(), profile?.address.orEmpty(), profile?.username.orEmpty()))
+    }
+    fun closeServerEditor() {
+        if (editorMutable.value?.committing == true) return
+        editorRevision++; editorClient?.cancelRequests(); editorJob?.cancel(); editorClient = null
+        editorMutable.value = null
+    }
+    fun editServerDraft(draft: ServerDraft) {
+        if (editorMutable.value?.committing == true) return
+        editorRevision++; editorClient?.cancelRequests(); editorJob?.cancel(); editorClient = null
+        editorMutable.value = ServerEditorState(draft)
+    }
+    fun submitServerEditor(testOnly: Boolean = false, activate: Boolean = false): Job? {
+        val initial = editorMutable.value ?: return null
+        if (initial.busy || switching) return editorJob
+        val revision = ++editorRevision
+        val client = JiayinRepository(getApplication())
+        editorClient = client
+        editorMutable.value = initial.copy(busy = true, message = if (testOnly) "正在测试连接" else "正在验证连接", errors = emptyMap(), success = false)
+        return viewModelScope.launch {
+            var committed: String? = null
+            try {
+                val prepared = withTimeout(45_000) { client.prepareServer(initial.draft, testOnly) }
+                ensureActive()
+                if (revision != editorRevision) return@launch
+                if (testOnly) {
+                    editorMutable.value = initial.copy(success = true, message = "连接成功 · 尚未保存")
+                    return@launch
+                }
+                editorMutable.value = initial.copy(busy = true, committing = true, message = "正在保存连接")
+                switching = true
+                withContext(NonCancellable) {
+                    val current = repo.profiles.active()?.profile?.id
+                    val shouldActivate = activate || prepared.profile.id == current
+                    if (prepared.nameOnly) {
+                        withContext(Dispatchers.IO) { repo.profiles.rename(prepared.profile.id, prepared.profile.name) }
+                        committed = prepared.profile.id
+                        if (activate && prepared.profile.id != current) switcher.switchTo(prepared.profile)
+                    } else {
+                        if (shouldActivate && current != null) quiesceAccount()
+                        else AccountDownloads.pauseAndAwait(getApplication(), prepared.profile.id, pauseScheduler = false)
+                        withContext(Dispatchers.IO) {
+                            check(prepared.original == null || repo.profiles.find(prepared.original.id) == prepared.original) { "Connection changed" }
+                            repo.profiles.commitConnection(prepared.profile, prepared.token!!, prepared.salt!!, shouldActivate)
+                        }
+                        committed = prepared.profile.id
+                        if (shouldActivate) reloadAccount()
+                    }
+                    refreshServers()
+                }
+                editorMutable.value = null
+                message("连接已保存" + if (committed == repo.account && !prepared.nameOnly) " · 播放与下载保持暂停" else "")
+            } catch (e: TimeoutCancellationException) {
+                if (revision == editorRevision) editorMutable.value = initial.copy(message = "连接或停止后台任务超时，请重试")
+                if (frozen) withContext(NonCancellable) { reloadAccount() }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                if (frozen) withContext(NonCancellable) { runCatching { reloadAccount() } }
+                if (revision == editorRevision) editorMutable.value = initial.copy(savedId = committed,
+                    message = if (committed != null) "配置已保存，但加载或切换未完成。可关闭配置后从服务器列表重试。" else ServerEditorPolicy.error(e),
+                    errors = if (e is ServerFieldError) mapOf(e.field to e.message.orEmpty()) else emptyMap(),
+                    needsIdentityConfirmation = e is LibraryIdentityUnknown)
+            } finally {
+                client.cancelRequests()
+                if (revision == editorRevision) { editorClient = null; switching = false; serversMutable.update { it.copy(blocking = false) } }
+            }
+        }.also { editorJob = it }
+    }
     private var switchJob: Job? = null
     private var switching = false
     private var frozen = false
@@ -125,10 +202,11 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
         val artists = withContext(Dispatchers.IO) { repo.list("artist", ArtistProfile::class.java).associateBy { it.id } }
         val rules = withContext(Dispatchers.IO) { repo.list("folder-region", PathRegionRule::class.java) }
         val ownership = withContext(Dispatchers.IO) { OwnershipRepository(repo).effective() }
+        val personalOwnership = withContext(Dispatchers.IO) { OwnershipRepository(repo).personal().map { it.trackId }.toSet() }
         val index = withContext(Dispatchers.Default) { LibraryIndex.build(local.first, artists, rules, AndroidNameOrdering(), ownership) }
         val recommendations = withContext(Dispatchers.Default) { RecommendationEngine.recommend(local.first.tracks, local.second, System.currentTimeMillis() / 86_400_000 + batch, ownership = ownership) }
         if (expected != refreshNumber) return
-        mutable.update { it.copy(configured = repo.configured, loading = false, library = local.first, records = local.second, artists = artists, recommendations = recommendations, pending = local.third, uncertain = uncertain, index = index, regionRules = rules) }
+        mutable.update { it.copy(configured = repo.configured, loading = false, library = local.first, records = local.second, artists = artists, recommendations = recommendations, pending = local.third, uncertain = uncertain, index = index, regionRules = rules, personalOwnership = personalOwnership) }
         if (search.value.active) updateSearch(search.value.query)
     }
     fun openSearch(scope: SearchScope = SearchScope()) {
@@ -138,6 +216,11 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun hideSearch() { searchJob?.cancel(); searchMutable.update { it.copy(active = false, busy = false) } }
     fun resumeSearch() { searchMutable.update { it.copy(active = true, focusKeyboard = false) }; updateSearch(search.value.query) }
+    fun restoreSearchSnapshot(snapshot: SearchUiState) {
+        searchJob?.cancel()
+        searchMutable.value = snapshot.copy(focusKeyboard = false, busy = false)
+        if (snapshot.active) updateSearch(snapshot.query, snapshot.scope, snapshot.category)
+    }
     fun updateSearch(query: String, scope: SearchScope = search.value.scope, category: SearchKind = search.value.category) {
         searchJob?.cancel()
         searchMutable.update { it.copy(query = query, scope = scope, category = category, hits = emptyList(), busy = query.isNotBlank()) }
@@ -209,6 +292,8 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
         serversMutable.update { it.copy(profiles = values, footprints = sizes) }
     }
     private fun serverTask(status: String, block: suspend () -> Unit): Job {
+        if (editorJob?.isActive == true) return editorJob!!
+        closeServerEditor()
         if (switchJob?.isActive == true) return switchJob!!
         switchJob = viewModelScope.launch {
             switching = true
@@ -240,6 +325,7 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
         com.eddyizm.tempus.jiayin.ui.Covers.cancelAccount(repo.account)
     }
     private suspend fun reloadAccount() {
+        withContext(Dispatchers.IO) { repo.profiles.finishPendingCommit() }
         repo = JiayinRepository.get(getApplication()).scoped(); lyricsRepo = LyricsRepository(repo)
         sessionJob = SupervisorJob(viewModelScope.coroutineContext[Job]); refreshNumber++
         artistRequests.clear(); selectedCollection = null; searchOrigin = null; batch = 0
@@ -494,5 +580,5 @@ class JiayinViewModel(app: Application) : AndroidViewModel(app) {
         try { block() } catch (e: CancellationException) { throw e } catch (e: Exception) { message(e.message ?: "操作失败，请重试") }
     }
     private fun child(t: Track) = Child(t.id, title = t.title, artist = t.artist, album = t.album, coverArtId = t.cover.ifBlank { null }, duration = t.duration, albumId = t.albumId, artistId = t.artistId)
-    override fun onCleared() { if (frozen) SessionGate.clear(); repo.cancelRequests(); sessionJob.cancel(); controllerFuture?.let { MediaController.releaseFuture(it) } }
+    override fun onCleared() { editorClient?.cancelRequests(); if (frozen) SessionGate.clear(); repo.cancelRequests(); sessionJob.cancel(); controllerFuture?.let { MediaController.releaseFuture(it) } }
 }

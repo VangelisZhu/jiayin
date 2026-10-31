@@ -65,7 +65,7 @@ class JiayinRepository(val context: Context, private val fixedSession: AccountSe
         val addressClean = url.toString().trimEnd('/')
         val salt = UUID.randomUUID().toString().replace("-", "")
         val token = MessageDigest.getInstance("MD5").digest((password + salt).toByteArray()).joinToString("") { "%02x".format(it) }
-        val scope = ServerProfiles.id(addressClean, username)
+        val scope = profiles.all().find { it.address == addressClean && it.username == username }?.id ?: UUID.randomUUID().toString()
         requestAt(addressClean, username, token, salt, "ping")
         vault.putAll(mapOf("$scope.token" to token, "$scope.salt" to salt))
         CredentialBridge.invalidate()
@@ -74,6 +74,48 @@ class JiayinRepository(val context: Context, private val fixedSession: AccountSe
     suspend fun login(address: String, username: String, password: String) {
         check(!fixed) { "请通过服务器管理切换账户" }
         profiles.activate(saveProfile(address, username, password)); bindUpstream()
+    }
+    /** This repository has its own HTTP client; cancelling an editor never cancels playback. */
+    suspend fun prepareServer(draft: ServerDraft, testing: Boolean = false): PreparedServer = withContext(Dispatchers.IO) {
+        val address = ServerEditorPolicy.address(draft.address)
+        val user = draft.username.trim()
+        if (user.isEmpty()) throw ServerFieldError("username", "请填写账户")
+        val original = draft.originalId?.let { profiles.find(it) ?: throw ServerFieldError("address", "原连接已移除，请重新打开配置") }
+        val changedAddress = original != null && original.address != address
+        val changedUser = original != null && original.username != user
+        val separate = changedUser || (changedAddress && draft.preserve == false)
+        if (!testing && changedAddress && !changedUser && draft.preserve == null) throw ServerFieldError("identity", "请选择这是同一 NAS 换地址，还是另一台服务器")
+        if (!testing && changedAddress && !separate && !draft.confirmedSameLibrary) throw ServerFieldError("identity", "请确认仍是同一服务、同一账户且未重建曲库")
+        val duplicate = profiles.all().find { it.address == address && it.username == user && it.id != original?.id }
+        if (duplicate != null) throw ServerFieldError("address", "此地址与账户已有连接，请返回服务器列表使用已有连接")
+        val id = if (original != null && !separate) original.id else UUID.randomUUID().toString()
+        val profile = ServerProfile(id, draft.name.trim().ifBlank { original?.name ?: address.toHttpUrl().host }, address, user)
+        val oldAuth = original?.takeIf { it.authenticated && !changedAddress && !changedUser }?.let { vault.authentication(it.id) }
+        if (draft.password.isEmpty() && oldAuth == null) throw ServerFieldError("password", "请填写密码；地址或账户变更后需重新验证")
+        val nameOnly = original != null && !changedAddress && !changedUser && draft.password.isEmpty() && oldAuth != null
+        if (nameOnly && !testing) return@withContext PreparedServer(profile, null, null, true, original)
+        val auth = if (draft.password.isEmpty()) oldAuth!! else {
+            val salt = UUID.randomUUID().toString().replace("-", "")
+            MessageDigest.getInstance("MD5").digest((draft.password + salt).toByteArray()).joinToString("") { "%02x".format(it) } to salt
+        }
+        requestAt(address, user, auth.first, auth.second, "ping")
+        if (!testing && changedAddress && !separate) {
+            val local = AccountStorage(dao, original!!.id).get("library", "snapshot", Library::class.java)?.tracks.orEmpty()
+            var verified = 0
+            for (track in local.sortedBy { it.id }.take(3)) {
+                val remote = try { requestAt(address, user, auth.first, auth.second, "getSong", mapOf("id" to listOf(track.id))).getAsJsonObject("song") }
+                    catch (e: AuthenticationRequired) { throw e } catch (_: Exception) { null }
+                if (remote != null) {
+                    val value = parseTrack(remote)
+                    if (value.id != track.id || value.title.trim() != track.title.trim() ||
+                        (value.duration > 0 && track.duration > 0 && kotlin.math.abs(value.duration - track.duration) > 3))
+                        throw ServerFieldError("identity", "新地址的歌曲标识对应不同内容，请另存为独立连接")
+                    verified++
+                }
+            }
+            if (verified == 0 && !draft.acceptUnverified) throw LibraryIdentityUnknown()
+        }
+        PreparedServer(profile, auth.first, auth.second, original = original)
     }
     suspend fun testProfile(profile: ServerProfile): String = withContext(Dispatchers.IO) {
         val auth = vault.authentication(profile.id) ?: throw AuthenticationRequired()

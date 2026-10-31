@@ -151,11 +151,13 @@ class MediaPipelineTest {
         }
     }
 
-    internal class MediaServer(count: Int = 2, catalog: Boolean = false, supplied: List<Track>? = null, val username: String = "fixture", frequency: Int = 440, coverColor: Int = 0xff3b7777.toInt(), allowedUsers: Set<String> = setOf(username), sampleRate: Int = 16000, bits: Int = 16, channels: Int = 1) : AutoCloseable {
+    internal class MediaServer(count: Int = 2, catalog: Boolean = false, supplied: List<Track>? = null, val username: String = "fixture", frequency: Int = 440, coverColor: Int = 0xff3b7777.toInt(), allowedUsers: Set<String> = setOf(username), sampleRate: Int = 16000, bits: Int = 16, channels: Int = 1, durationSeconds: Int = 30) : AutoCloseable {
         private val socket = ServerSocket(0)
         val port get() = socket.localPort
         var online = true
         var searchDelay = 0L
+        var pingDelay = 0L
+        var missingSong = false
         var downloadChunkDelay = 0L
         val requests = AtomicInteger()
         val searches = AtomicInteger()
@@ -168,10 +170,10 @@ class MediaPipelineTest {
         val tracks = supplied ?: (1..count).map { Track("pipeline-$scope-$it", "播放测试 $it", if (catalog) "示例歌手 ${it % 3}" else "家音测试", album = if (catalog) "专辑 ${it % 2}" else "", albumId = if (catalog) "album-${it % 2}" else "", artistId = if (catalog) "artist-${it % 3}" else "", duration = 30, genre = if (catalog) "风格 ${it % 2}" else "", releaseDate = if (catalog) 20200101L + it * 10000 else 0) }
         var rejectMetadata = false
         val starCalls = AtomicInteger()
-        private val audio: ByteArray = ByteBuffer.allocate(44 + sampleRate * (bits / 8) * channels * 30).order(ByteOrder.LITTLE_ENDIAN).apply {
+        private val audio: ByteArray = ByteBuffer.allocate(44 + sampleRate * (bits / 8) * channels * durationSeconds).order(ByteOrder.LITTLE_ENDIAN).apply {
             put("RIFF".toByteArray()); putInt(capacity() - 8); put("WAVEfmt ".toByteArray()); putInt(16); putShort(1); putShort(channels.toShort())
             putInt(sampleRate); putInt(sampleRate * (bits / 8) * channels); putShort(((bits / 8) * channels).toShort()); putShort(bits.toShort()); put("data".toByteArray()); putInt(capacity() - 44)
-            repeat(sampleRate * 30) { n -> repeat(channels) {
+            repeat(sampleRate * durationSeconds) { n -> repeat(channels) {
                 val value = (sin(2 * Math.PI * frequency * n / sampleRate) * if (bits == 24) 512000 else 2000).toInt()
                 if (bits == 24) { put(value.toByte()); put((value shr 8).toByte()); put((value shr 16).toByte()) } else putShort(value.toShort())
             } }
@@ -198,12 +200,13 @@ class MediaPipelineTest {
                     val expected = java.security.MessageDigest.getInstance("MD5").digest(("fixture-password" + parameters["s"]).toByteArray()).joinToString("") { "%02x".format(it) }
                     val authenticated = parameters["u"] in allowedUsers && parameters["t"] == expected
                     if (request.contains("/search3") && searchDelay > 0) Thread.sleep(searchDelay)
+                    if (request.contains("/ping") && pingDelay > 0) Thread.sleep(pingDelay)
                     var type = "application/json" + (jsonCharset?.let { "; charset=$it" } ?: "")
                     val result: ByteArray = if (!online || !authenticated) "unavailable".toByteArray() else when {
                         request.contains("/getCoverArt") -> { images.incrementAndGet(); type = "image/png"; png }
                         request.contains("/stream") -> {
                             streams.incrementAndGet(); type = "audio/wav"
-                            val seconds = (parameters["timeOffset"]?.toIntOrNull() ?: 0).coerceIn(0, 29)
+                            val seconds = (parameters["timeOffset"]?.toIntOrNull() ?: 0).coerceIn(0, durationSeconds - 1)
                             offsets.add(seconds)
                             if (streamDelay > 0) Thread.sleep(streamDelay)
                             if (seconds == 0) audio else {
@@ -221,6 +224,7 @@ class MediaPipelineTest {
                                 val offset = Regex("songOffset=(\\d+)").find(String(body))?.groupValues?.get(1)?.toInt() ?: 0
                                 mapOf("status" to "ok", "searchResult3" to mapOf("song" to tracks.drop(offset).take(500).map { t -> Gson().toJsonTree(t).asJsonObject.apply { addProperty("coverArt", t.cover); if (t.releaseDate > 0) addProperty("year", t.releaseDate / 10000) } }))
                             }
+                            request.contains("/getSong") && !missingSong -> mapOf("status" to "ok", "song" to tracks.find { it.id == parameters["id"] })
                             request.contains("/getLyricsBySongId") -> mapOf("status" to "ok", "lyricsList" to mapOf("structuredLyrics" to listOf(mapOf("lang" to "kor", "kind" to "original", "line" to lyrics?.lines.orEmpty().map { mapOf("start" to it.timeMs, "value" to it.original) }))))
                             request.contains("/getArtists") && !rejectMetadata -> mapOf("status" to "ok", "artists" to mapOf("index" to listOf(mapOf("artist" to tracks.distinctBy { it.artistId }.filter { it.artistId.isNotBlank() }.map { mapOf("id" to it.artistId, "name" to it.artist) }))))
                             request.contains("/getTopSongs") && !rejectMetadata -> mapOf("status" to "ok", "topSongs" to mapOf("song" to tracks.reversed()))

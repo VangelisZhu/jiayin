@@ -26,7 +26,7 @@ import com.eddyizm.tempus.jiayin.core.*
     val byId = remember(ui.library.tracks) { ui.library.tracks.associateBy { it.id } }
     val tracks = list.tracks.mapNotNull { byId[it] }
     val first = tracks.firstOrNull()
-    val artistId = list.id.removePrefix("artist:")
+    val artistId = list.id.removePrefix("artist:").removePrefix("performer:")
     val profile = ui.artists[artistId] ?: ArtistProfile(artistId, list.name)
     val resolvedRegion = ui.index.artists.firstOrNull { it.id == profile.id }?.region ?: profile.region
     var category by rememberSaveable(list.id) { mutableStateOf("歌曲") }
@@ -38,7 +38,7 @@ import com.eddyizm.tempus.jiayin.core.*
     val ordered = remember(tracks, popular, query) { (if (popular.isNotEmpty()) popular + tracks.filterNot { t -> popular.any { it.id == t.id } } else tracks.sortedWith(compareByDescending<Track> { it.releaseDate }.thenBy { it.album }.thenBy { it.disc }.thenBy { it.number }.thenBy { it.title })).filter { "${it.title} ${it.album}".contains(query, true) } }
     AdaptiveBrowserPage(header = {
         PageTitle(list.name, "${tracks.size} 首 · $resolvedRegion · ${profile.type}", back) {
-            IconAction(R.drawable.ic_search, "搜索歌手作品") { search(SearchScope(artist = profile.id)) }
+            IconAction(R.drawable.ic_search, "搜索歌手作品") { search(SearchScope(artist = profile.id, originalPerformer = list.id.startsWith("performer:"))) }
             IconAction(if (profile.starred) R.drawable.ic_favorite else R.drawable.ic_favorites_outlined, if (profile.starred) "取消收藏歌手" else "收藏歌手") { vm.favoriteArtist(profile) }
         }
         FlowRow(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {

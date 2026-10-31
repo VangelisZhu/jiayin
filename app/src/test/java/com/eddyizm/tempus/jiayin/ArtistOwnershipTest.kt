@@ -32,6 +32,12 @@ class ArtistOwnershipTest {
         assertEquals(3, i.search("Song", SearchScope(artist = main.key)).size)
         assertTrue(i.search("Song", SearchScope(artist = combo.key)).isEmpty())
     }
+    @Test fun originalPerformerSearchStaysAvailableAfterPersonalGrouping() {
+        val t = track("one", combo)
+        val i = index(listOf(t), mapOf(t.id to main))
+        assertTrue(i.search("Song", SearchScope(artist = combo.key)).isEmpty())
+        assertEquals(listOf("one"), i.search("Song", SearchScope(artist = combo.key, originalPerformer = true)).map { it.id })
+    }
     @Test fun movingSelectedSongRetainsOtherSongsInSourceGroup() {
         val i = index(listOf(track("one", combo), track("two", combo)), mapOf("one" to main))
         assertEquals(setOf("main", "combined"), i.artists.map { it.id }.toSet())

@@ -71,7 +71,7 @@ import sh.calvin.reorderable.*
     }
 }
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-@Composable fun FullPlayer(ui: HomeState, playback: PlaybackState, vm: JiayinViewModel, dark: Boolean, close: () -> Unit, addToPlaylist: (Track) -> Unit = {}, artist: (Track) -> Unit = {}, correct: (Track) -> Unit = {}) {
+@Composable fun FullPlayer(ui: HomeState, playback: PlaybackState, vm: JiayinViewModel, dark: Boolean, close: () -> Unit, addToPlaylist: (Track) -> Unit = {}, information: (Track) -> Unit = {}) {
     var audioEffects by remember { mutableStateOf(false) }
     if (audioEffects) AudioEffectsPage(vm) { audioEffects = false }
     var lyrics by rememberSaveable { mutableStateOf(false) }
@@ -129,7 +129,7 @@ import sh.calvin.reorderable.*
                     Row(Modifier.fillMaxWidth().padding(start = LocalPhoneLayout.current.gutter, end = 16.dp, top = if (compact) 0.dp else 10.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(t.title, fontSize = if (compact) 20.sp else 25.sp, fontWeight = FontWeight.SemiBold, maxLines = if (compact) 1 else 2, overflow = TextOverflow.Ellipsis)
-                            Text(t.artist, Modifier.clickable { artist(t) }.padding(top = if (compact) 2.dp else 9.dp, bottom = if (compact) 0.dp else 6.dp), fontSize = if (compact) 12.sp else 14.sp, color = foreground.copy(alpha = .75f))
+                            Text(t.artist, Modifier.padding(top = if (compact) 2.dp else 9.dp, bottom = if (compact) 0.dp else 6.dp), fontSize = if (compact) 12.sp else 14.sp, color = foreground.copy(alpha = .75f))
                         }
                         IconAction(if (actual?.starred == true) R.drawable.ic_favorite else R.drawable.ic_favorites_outlined, "喜欢", tint = foreground) { actual?.let { vm.favorite(it) } }
                     }
@@ -152,7 +152,7 @@ import sh.calvin.reorderable.*
                         TextButton({ queue = true }) { AppIcon(R.drawable.ic_queue, "队列", tint = foreground); Spacer(Modifier.width(6.dp)); Text("队列", color = foreground, fontSize = 13.sp) }
                         TextButton({ addToPlaylist(t) }) { AppIcon(R.drawable.ic_playlist_add, "加入歌单", tint = foreground) }
                         TextButton({ vm.download(listOf(t)) }) { AppIcon(R.drawable.ic_download, "下载", tint = foreground) }
-                        TextButton({ correct(t) }) { Text("纠正信息", color = foreground) }
+                        TextButton({ information(actual ?: t) }, Modifier.heightIn(min = 48.dp)) { AppIcon(R.drawable.ic_info_stream, "歌曲信息", tint = foreground); Spacer(Modifier.width(4.dp)); Text("歌曲信息", color = foreground) }
                     }
                     })
                 }
@@ -231,7 +231,7 @@ import sh.calvin.reorderable.*
         }
         if (lines.isEmpty()) Column(Modifier.fillMaxWidth().weight(1f).clickable(onClickLabel = "显示唱片", onClick = showRecord), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
             Text(if (ui.lyricsBusy) "正在读取和检查歌词…" else if (damaged) display?.issue.orEmpty() else "这首歌还没有歌词", Modifier.padding(horizontal = 24.dp), color = color.copy(alpha = .7f), fontSize = 13.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
-            if (damaged && vm.repo.settings.getBoolean("auto-repair-lyrics", true)) TextButton({ vm.loadLyrics(true) }, enabled = !ui.lyricsBusy) { Text("重试自动修复", color = color, fontSize = 12.sp) }
+            if (damaged && vm.repo.settings.getBoolean("auto-repair-lyrics", false)) TextButton({ vm.loadLyrics(true) }, enabled = !ui.lyricsBusy) { Text("重试自动修复", color = color, fontSize = 12.sp) }
             TextButton(match) { Text("手动联网匹配", color = color) }
         } else {
             LazyColumn(state = scroll, modifier = Modifier.weight(1f).fillMaxWidth().semantics {

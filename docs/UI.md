@@ -12,7 +12,15 @@
 
 ## 服务器
 
-<img src="screenshots/server-management.png" width="240" alt="多服务器管理"/> <img src="screenshots/server-add.png" width="240" alt="添加服务器"/>
+<img src="screenshots/server-management.png" width="240" alt="多服务器管理"/> <img src="screenshots/server-editor.png" width="240" alt="编辑连接：键盘上方直接显示认证错误"/>
+
+preview.17-rc.1 新增、编辑和首次连接共用全屏表单；错误持续显示在当前页面。上图使用本机生成服务，错误密码为测试数据。
+
+## 歌曲信息
+
+播放页通过“歌曲信息”查看演唱者、个人／共享归属和专辑。进入详情后逐层返回播放页，不改变播放队列。更多资料和操作可向上滚动查看。
+
+<img src="screenshots/song-information.png" width="240" alt="歌曲信息：合唱演唱者与个人归属分别展示"/>
 
 界面根据可用窗口、字号和键盘状态调整。小屏或大字号时部分内容需要滚动，操作不会因屏幕变窄而消失。参阅[兼容性与验证范围](COMPATIBILITY.md)。
 

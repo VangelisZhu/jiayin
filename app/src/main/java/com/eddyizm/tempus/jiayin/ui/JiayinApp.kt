@@ -33,6 +33,8 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 
 
+private data class PlayerBrowseOrigin(val route: String, val previous: String, val collection: MusicList?, val parent: MusicList?, val searchReturn: SearchReturnLocation?, val search: SearchUiState)
+
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable fun JiayinApp(vm: JiayinViewModel, openPlayer: Boolean) {
     val revision by vm.sessionRevision.collectAsState()
@@ -67,6 +69,11 @@ import kotlinx.coroutines.flow.map
     var menuTrack by remember { mutableStateOf<Track?>(null) }
     var correctionTarget by remember { mutableStateOf<CorrectionTarget?>(null) }
     var ownershipTarget by remember { mutableStateOf<List<Track>?>(null) }
+    var informationTarget by remember { mutableStateOf<SongInformation?>(null) }
+    var playerOrigin by remember { mutableStateOf<PlayerBrowseOrigin?>(null) }
+    var detailTrail by remember { mutableStateOf<List<MusicList>>(emptyList()) }
+    var searchTrailDepth by remember { mutableStateOf<Int?>(null) }
+    val playerStates = rememberSaveableStateHolder()
     var artistTarget by remember { mutableStateOf<Track?>(null) }
     var playlistTarget by remember { mutableStateOf<Track?>(null) }
     var newPlaylist by remember { mutableStateOf(false) }
@@ -86,21 +93,45 @@ import kotlinx.coroutines.flow.map
             route = origin.route; previousRoute = origin.previous; collection = origin.collection; vm.selectedCollection = collection; parentCollection = origin.parent
             vm.restoreBrowser(origin.category, origin.folder)
         }
-        searchReturn = null; vm.resumeSearch()
+        searchReturn = null; searchTrailDepth = null; vm.resumeSearch()
     }
     val openSearch: (SearchScope) -> Unit = { pageStates.removeState(vm.repo.account + ":independent-search"); searchReturn = null; vm.openSearch(it) }
     val backCollection: () -> Unit = {
-        val parent = parentCollection
-        if (parent != null) { collection = parent; vm.selectedCollection = parent; parentCollection = null }
-        else if (searchReturn != null) restoreSearch()
-        else route = previousRoute.takeIf { it != "detail" } ?: "library"
+        val origin = playerOrigin
+        if (origin != null) {
+            if (searchReturn != null && searchTrailDepth == detailTrail.size) {
+                restoreSearch()
+            } else if (detailTrail.isNotEmpty()) {
+                collection = detailTrail.last(); vm.selectedCollection = collection; detailTrail = detailTrail.dropLast(1)
+            } else {
+                route = origin.route; previousRoute = origin.previous; collection = origin.collection
+                vm.selectedCollection = collection; parentCollection = origin.parent; searchReturn = origin.searchReturn
+                vm.restoreSearchSnapshot(origin.search)
+                playerOrigin = null; player = true
+            }
+        } else {
+            val parent = parentCollection
+            if (parent != null) { collection = parent; vm.selectedCollection = parent; parentCollection = null }
+            else if (searchReturn != null) restoreSearch()
+            else route = previousRoute.takeIf { it != "detail" } ?: "library"
+        }
     }
-    val openCollection: (MusicList) -> Unit = {
-        if (searchState.active) {
+    val openCollection: (MusicList) -> Unit = { target ->
+        if (playerOrigin != null) {
+            if (route == "detail") collection?.let { detailTrail = detailTrail + it }
+        } else if (searchState.active) {
             searchReturn = SearchReturnLocation(route, previousRoute, collection, parentCollection, vm.repo.settings.getString("${vm.repo.account}.browse-library-category", "专辑") ?: "专辑", vm.repo.settings.getString("${vm.repo.account}.browse-folder", "").orEmpty())
             vm.hideSearch(); previousRoute = route; parentCollection = null
         } else if (route == "detail") parentCollection = collection else { previousRoute = route; parentCollection = null }
-        collection = it; vm.selectedCollection = it; route = "detail"
+        collection = target; vm.selectedCollection = target; route = "detail"
+    }
+    val openInformationDetail: (MusicList) -> Unit = { target ->
+        if (informationTarget != null) {
+            informationTarget = null
+            playerOrigin = PlayerBrowseOrigin(route, previousRoute, collection, parentCollection, searchReturn, searchState)
+            detailTrail = emptyList(); searchReturn = null; searchTrailDepth = null; vm.hideSearch(); player = false
+            collection = target; vm.selectedCollection = target; parentCollection = null; route = "detail"
+        }
     }
     val openRoute: (String) -> Unit = { previousRoute = route; route = it }
     LaunchedEffect(route, collection) { if (route == "detail" && collection == null) route = "library" }
@@ -132,7 +163,7 @@ import kotlinx.coroutines.flow.map
                             if (playback.current != null && showMini) MiniPlayer(playback, showPlayer, { vm.command("toggle") }, { miniQueue = true }, visible = !player)
                             if (!searchState.active) NavigationBar(modifier = if (LocalPhoneLayout.current.shortWindow) Modifier.height(56.dp) else Modifier, windowInsets = WindowInsets(0, 0, 0, 0), containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 0.dp) {
                                 listOf(Triple("home", "首页", R.drawable.ic_home), Triple("library", "曲库", R.drawable.ic_albums), Triple("search", "搜索", R.drawable.ic_search), Triple("my", "我的", R.drawable.ic_favorite)).forEach { (id, label, icon) ->
-                                    NavigationBarItem(route == id, { searchReturn = null; route = id }, icon = { AppIcon(icon, label) }, label = if (LocalPhoneLayout.current.shortWindow) null else { { Text(label, fontSize = 12.sp) } })
+                                    NavigationBarItem(route == id, { playerOrigin = null; detailTrail = emptyList(); searchReturn = null; route = id }, icon = { AppIcon(icon, label) }, label = if (LocalPhoneLayout.current.shortWindow) null else { { Text(label, fontSize = 12.sp) } })
                                 }
                             }
                         }
@@ -151,7 +182,7 @@ import kotlinx.coroutines.flow.map
                                     val entry = ui.index.artists.find { it.id == c.id.removePrefix("artist:") }
                                     c.copy(tracks = entry?.tracks.orEmpty().map { it.id })
                                 } else c
-                                if (actual.id.startsWith("artist:") || actual.id.startsWith("歌手:")) ArtistPage(actual, ui, vm, backCollection, { menuTrack = it }, openCollection, openSearch, { ownershipTarget = it }) { tracks -> correctionTarget = CorrectionTarget(tracks, "artist", "纠正歌手作品") }
+                                if (actual.id.startsWith("artist:") || actual.id.startsWith("performer:") || actual.id.startsWith("歌手:")) ArtistPage(actual, ui, vm, backCollection, { menuTrack = it }, openCollection, openSearch, { ownershipTarget = it }) { tracks -> correctionTarget = CorrectionTarget(tracks, "artist", "纠正歌手作品") }
                                 else CollectionPage(actual, ui, vm, backCollection, { menuTrack = it }, { renameList = actual }, { collection = it }) { tracks -> correctionTarget = CorrectionTarget(tracks, "album", "纠正专辑资料") }
                             }
                             "history" -> TrackPage("最近听过", ui.library.tracks.sortedByDescending { ui.records[it.id]?.lastHeard ?: 0 }.filter { (ui.records[it.id]?.lastHeard ?: 0) > 0 }, ui, vm, { route = "my" }, { menuTrack = it })
@@ -162,12 +193,13 @@ import kotlinx.coroutines.flow.map
                             "downloads" -> DownloadsPage(ui, vm, { menuTrack = it }, { route = "my" })
                         } }
                         }
-                        if (searchState.active) pageStates.SaveableStateProvider(pageKey(vm.repo.account + ":independent-search")) { DedicatedSearch(ui, searchState, vm, { hit ->
+                        if (searchState.active && !player) pageStates.SaveableStateProvider(pageKey(vm.repo.account + ":independent-search")) { DedicatedSearch(ui, searchState, vm, { hit ->
                             if (hit.kind == SearchKind.SONGS) {
                                 val songs = searchState.hits.filter { it.kind == SearchKind.SONGS }.mapNotNull { ui.index.tracks[it.id] }
                                 vm.start(songs, source = "搜索：${searchState.query}", index = songs.indexOfFirst { it.id == hit.id }.coerceAtLeast(0))
                             } else {
                                 searchReturn = SearchReturnLocation(route, previousRoute, collection, parentCollection, vm.repo.settings.getString("${vm.repo.account}.browse-library-category", "专辑") ?: "专辑", vm.repo.settings.getString("${vm.repo.account}.browse-folder", "").orEmpty(), hit.folder.takeIf { hit.kind == SearchKind.FOLDERS })
+                                if (playerOrigin != null) searchTrailDepth = detailTrail.size
                                 vm.hideSearch()
                                 if (hit.kind == SearchKind.FOLDERS) { route = "library"; vm.requestFolder(hit.folder.orEmpty()) }
                                 else {
@@ -184,17 +216,18 @@ import kotlinx.coroutines.flow.map
                     }
                 }
                 AnimatedVisibility(player, enter = fadeIn(tween(220)) + slideInVertically(tween(220)) { it / 6 }, exit = fadeOut(tween(220)) + slideOutVertically(tween(220)) { it / 6 }) {
-                    FullPlayer(ui, playback, vm, dark, { player = false }, { playlistTarget = it }, { song ->
-                        val owner = ui.index.ownership[song.id]
-                        if (owner != null) { player = false; openCollection(artistCollection(owner, ui.library.tracks, song.cover)) }
-                        else if (song.performers().size > 1) artistTarget = song
-                        else { player = false; openCollection(artistCollection(song, ui.library.tracks)) }
-                    }, { song -> correctionTarget = CorrectionTarget(listOf(song), title = "纠正歌曲信息") })
+                    playerStates.SaveableStateProvider("player") {
+                        FullPlayer(ui, playback, vm, dark, { player = false }, { playlistTarget = it }, { song ->
+                            informationTarget = SongInformation(song, ui.index.ownership[song.id], vm.repo.profiles.find(vm.repo.account)?.name.orEmpty(), song.id in ui.personalOwnership)
+                        })
+                    }
                 }
                 if (player) SnackbarHost(snack, Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(16.dp))
                 if (miniQueue) QueueSheet(ui, playback, vm) { miniQueue = false }
             }
         }
+        val editor by vm.serverEditor.collectAsState()
+        editor?.let { ServerEditorPage(vm, it) }
         menuTrack?.let { song ->
             ModalBottomSheet(onDismissRequest = { menuTrack = null }) {
                 Column(Modifier.padding(horizontal = 24.dp).padding(bottom = 30.dp)) {
@@ -213,6 +246,10 @@ import kotlinx.coroutines.flow.map
                 }
             }
         }
+        informationTarget?.let { info -> SongInformationSheet(info, ui, { informationTarget = null }, openInformationDetail,
+            { playlistTarget = info.track; informationTarget = null },
+            { ownershipTarget = listOf(info.track); informationTarget = null },
+            { correctionTarget = CorrectionTarget(listOf(info.track), title = "纠正歌曲信息"); informationTarget = null }) }
         correctionTarget?.let { target -> CorrectionPage(vm, target) { correctionTarget = null } }
         ownershipTarget?.let { tracks -> OwnershipPage(vm, tracks) { ownershipTarget = null } }
         artistTarget?.let { song ->
@@ -247,29 +284,11 @@ import kotlinx.coroutines.flow.map
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable fun LoginScreen(ui: HomeState, vm: JiayinViewModel) {
-    var address by rememberSaveable { mutableStateOf(vm.repo.server) }
-    var user by rememberSaveable { mutableStateOf(vm.repo.user) }
-    var password by remember { mutableStateOf("") }
-    var automaticLyrics by rememberSaveable { mutableStateOf(vm.repo.settings.getBoolean("auto-repair-lyrics", false)) }
-    Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding().verticalScroll(rememberScrollState()).padding(28.dp), verticalArrangement = Arrangement.Center) {
-        Text("家音", fontSize = 42.sp, fontWeight = FontWeight.Bold, color = HomeGreen)
-        Text("让家里的音乐，陪你出门。", Modifier.padding(top = 10.dp, bottom = 40.dp), style = MaterialTheme.typography.titleMedium)
-        OutlinedTextField(address, { address = it }, label = { Text("音乐服务器地址") }, placeholder = { Text("https://music.example.com") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-        Spacer(Modifier.height(14.dp))
-        OutlinedTextField(user, { user = it }, label = { Text("账户") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-        Spacer(Modifier.height(14.dp))
-        OutlinedTextField(password, { password = it }, label = { Text("密码") }, modifier = Modifier.fillMaxWidth(), singleLine = true, visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation())
-        Spacer(Modifier.height(28.dp))
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(automaticLyrics, { automaticLyrics = it })
-            Text("允许乱码歌词自动联网修复", fontSize = 13.sp)
-        }
-        Text("开启后，仅发现乱码时向 LRCLIB 发送歌名和歌手；正常歌词不会自动匹配。可随时在设置关闭。", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.height(18.dp))
-        Button({ vm.repo.settings.edit().putBoolean("auto-repair-lyrics", automaticLyrics).apply(); vm.login(address, user, password) }, Modifier.fillMaxWidth().heightIn(min = 54.dp), enabled = !ui.loading && address.isNotBlank() && user.isNotBlank() && password.isNotEmpty()) { Text(if (ui.loading) ui.status else "连接我的音乐") }
-        serverUiError(vm)?.let { Text(it, Modifier.padding(top = 12.dp), color = MaterialTheme.colorScheme.error) }
-        ui.message?.let { Text(it, Modifier.padding(top = 18.dp), color = MaterialTheme.colorScheme.error) }
-        Text("填写你自己的 Navidrome 或兼容 Subsonic 的音乐服务地址与账户，不要填写 NAS 管理页面地址。认证信息加密保存在本机。家音不提供公共曲库或共享账户。", Modifier.padding(top = 24.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+    LaunchedEffect(Unit) { if (vm.serverEditor.value == null) vm.openServerEditor() }
+    Column(Modifier.fillMaxSize().safeDrawingPadding().padding(28.dp), verticalArrangement = Arrangement.Center) {
+        Text("家音", style = MaterialTheme.typography.displayMedium)
+        Text("让家里的音乐，陪你出门。", Modifier.padding(vertical = 24.dp))
+        Button({ vm.openServerEditor() }) { Text("连接我的音乐") }
     }
 }
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)

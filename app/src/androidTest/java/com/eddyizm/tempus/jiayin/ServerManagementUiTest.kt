@@ -31,16 +31,7 @@ class ServerManagementUiTest {
         while (queue.isNotEmpty()) { val n = queue.removeFirst(); result += n; for (i in 0 until n.childCount) n.getChild(i)?.let { queue.add(it) } }
         return result
     }
-    private fun click(label: String) {
-        val node = nodes().lastOrNull { it.text?.toString() == label || it.contentDescription?.toString() == label } ?: error("Missing control: $label")
-        val rect = Rect(); node.getBoundsInScreen(rect)
-        val now = SystemClock.uptimeMillis()
-        for (action in listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP)) {
-            val event = MotionEvent.obtain(now, now + if (action == MotionEvent.ACTION_UP) 40 else 0, action, rect.exactCenterX(), rect.exactCenterY(), 0)
-            ins.uiAutomation.injectInputEvent(event, true); event.recycle()
-        }
-        SystemClock.sleep(450)
-    }
+    private fun click(label: String) = EditorTouch.click(label)
     private fun shot(name: String) {
         val folder = File(context.getExternalFilesDir(null), "server-ui").apply { mkdirs() }
         val image = ins.uiAutomation.takeScreenshot()
@@ -79,13 +70,13 @@ class ServerManagementUiTest {
                 click("添加服务器")
                 withTimeout(10000) { while (nodes().count { it.className?.toString() == "android.widget.EditText" } != 4) delay(100) }
                 assertEquals(4, nodes().count { it.className?.toString() == "android.widget.EditText" })
-                assertTrue(nodes().any { it.text?.toString() == "仅保存" })
+                assertTrue(nodes().any { it.text?.toString() == "保存" })
                 shot("05-add"); click("取消")
                 click("切换")
                 withTimeout(20000) { while (vm.servers.value.busy || vm.state.value.loading) delay(50) }
                 assertEquals(second.id, vm.repo.account)
                 delay(500)
-                assertTrue(nodes().any { it.text?.toString() == "音乐在家，随时随地听" })
+                EditorTouch.node("音乐在家，随时随地听")
                 assertFalse(nodes().any { it.text?.toString() == "当前使用" })
                 assertFalse(vm.search.value.active)
                 shot("06-switched-home")
